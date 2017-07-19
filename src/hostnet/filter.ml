@@ -36,9 +36,9 @@ module Make(Input: Sig.VMNET) = struct
   let writev t bufs = Input.writev t.input bufs
 
   let filter valid_subnets valid_sources next buf =
-    match (Wire_structs.parse_ethernet_frame buf) with
-    | Some (Some Wire_structs.IPv4, _, payload) ->
-      let src = Ipaddr.V4.of_int32 @@ Wire_structs.Ipv4_wire.get_ipv4_src payload in
+    match Ethif_packet.Unmarshal.of_cstruct buf with
+    | Ok (pkt, payload) ->
+      let src = Ipaddr.V4.of_int32 @@ Ethif_wire.get_ipv4_src payload in
       let from_valid_networks = List.fold_left (fun acc network -> acc || (Ipaddr.V4.Prefix.mem src network)) false valid_subnets in
       let from_valid_sources = List.fold_left (fun acc valid -> acc || (Ipaddr.V4.compare src valid = 0)) false valid_sources in
       if from_valid_sources || from_valid_networks

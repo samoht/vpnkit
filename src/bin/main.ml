@@ -93,11 +93,11 @@ let hvsock_connect_forever url sockaddr callback =
         | Unix.Unix_error(_, _, _) ->
           HV.Hvsock.close socket
           >>= fun () ->
-          Host.Time.sleep 1.
+          Host.Time.sleep_ns (Duration.of_sec 1)
         | _ ->
           HV.Hvsock.close socket
           >>= fun () ->
-          Host.Time.sleep 1.
+          Host.Time.sleep_ns (Duration.of_sec 1)
       )
     >>= fun () ->
     aux () in

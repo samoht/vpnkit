@@ -15,7 +15,7 @@ type datagram = {
 
 type reply = Cstruct.t -> unit Lwt.t
 
-module Make(Sockets: Sig.SOCKETS)(Time: V1_LWT.TIME): sig
+module Make(Sockets: Sig.SOCKETS)(Time: Mirage_time_lwt.S): sig
 
   type t
   (** A UDP NAT implementation *)

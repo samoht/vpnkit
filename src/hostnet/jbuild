@@ -1,17 +1,14 @@
 (jbuild_version 1)
 
 (library
-  ((name        hostnet)
-   (public_name hostnet)
-   (libraries (
-    cstruct lwt.unix logs mirage-types.lwt ipaddr mirage-flow
-    ppx_sexp_conv pcap-format mirage-console.unix tcpip.ethif
-    tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.udp tcpip.tcp tcpip.stack-direct
-    charrua-core.server dns dns.lwt ofs uwt uwt.ext uwt.preemptive
-    lwt.preemptive threads astring datakit-server.vfs dns-forward tar mirage-vnetif
-    dnssd uuidm mirage-http cohttp channel ezjsonm
-   ))
+  ((name      hostnet)
+   (libraries (cstruct lwt.unix logs ipaddr mirage-flow-lwt
+               mirage-protocols mirage-protocols-lwt mirage-clock-unix
+               ppx_sexp_conv pcap-format mirage-console-unix tcpip.ethif
+               tcpip.arpv4 tcpip.ipv4 tcpip.icmpv4 tcpip.udp tcpip.tcp
+               tcpip.stack-direct charrua-core.server dns dns.lwt ofs uwt
+               uwt.ext uwt.preemptive lwt.preemptive threads astring
+               datakit-server dns-forward tar mirage-vnetif dnssd uuidm
+               mirage-http cohttp mirage-channel ezjsonm))
    (c_names (stubs_utils))
-   (wrapped false)
-   (flags (:standard -warn-error "+1..49-3" -w "A-4-41-42-44"))
-))
+   (wrapped false)))

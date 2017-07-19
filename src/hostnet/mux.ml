@@ -8,17 +8,7 @@ let src =
 module Log = (val Logs.src_log src : Logs.LOG)
 
 module DontCareAboutStats = struct
-  type stats = {
-    mutable rx_bytes: int64;
-    mutable rx_pkts: int32;
-    mutable tx_bytes: int64;
-    mutable tx_pkts: int32;
-  }
-  let get_stats_counters _ = {
-    rx_bytes = 0L; rx_pkts = 0l;
-    tx_bytes = 0L; tx_pkts = 0l;
-  }
-
+  let get_stats_counters _ = Mirage_net.Stats.create ()
   let reset_stats_counters _ = ()
 end
 
@@ -27,11 +17,11 @@ module ObviouslyCommon = struct
 
   type buffer = Cstruct.t
 
-  type error = [
-    | `Unknown of string
-    | `Unimplemented
-    | `Disconnected
-  ]
+  type error = [`Unknown of string | Mirage_net.error]
+
+  let pp_error ppf = function
+    | #Mirage_net.error as e -> Mirage_net.pp_error ppf e
+    | `Unknown s -> Fmt.string ppf s
 
   type macaddr = Macaddr.t
 
@@ -40,7 +30,7 @@ module ObviouslyCommon = struct
   type id = unit
 end
 
-module Make(Netif: V1_LWT.NETWORK) = struct
+module Make(Netif: Mirage_net_lwt.S) = struct
   include DontCareAboutStats
   include ObviouslyCommon
 
@@ -94,17 +84,23 @@ module Make(Netif: V1_LWT.NETWORK) = struct
     let rules = RuleMap.empty in
     let default_callback = fun _ -> Lwt.return_unit in
     let t = { netif; rules; default_callback } in
-    Netif.listen netif @@ callback t
-    >>= fun () ->
-    Lwt.return t
+    Netif.listen netif @@ callback t >>= function
+    | Error e -> Fmt.kstrf Lwt.fail_with "connect error: %a" Netif.pp_error e
+    | Ok ()   -> Lwt.return t
 
-  let write t buffer =
-    Netif.write t.netif buffer
-  let writev t buffers =
-    Netif.writev t.netif buffers
+  let lift_error = function
+    | Error (#Mirage_device.error as e) -> Error (e :> error)
+    | Error e -> Fmt.kstrf (fun e -> Error (`Unknown e)) "%a" Netif.pp_error e
+    | Ok () -> Ok ()
+
+  let write t buffer = Netif.write t.netif buffer >|= lift_error
+  let writev t buffers = Netif.writev t.netif buffers >|= lift_error
+
   let listen t callback =
     t.default_callback <- callback;
-    Lwt.return_unit
+    (* NOTE(samoht): I though the Net.listen were supposed to block? *)
+    Lwt.return (Ok ())
+
   let disconnect t =
     Netif.disconnect t.netif
 
@@ -120,14 +116,14 @@ module Make(Netif: V1_LWT.NETWORK) = struct
       rule: rule;
     }
 
-    let write t buffer = Netif.write t.netif buffer
-    let writev t buffers = Netif.writev t.netif buffers
+    let write t buffer = Netif.write t.netif buffer >|= lift_error
+    let writev t buffers = Netif.writev t.netif buffers >|= lift_error
     let listen t callback =
       Log.debug (fun f -> f "activating switch port for %s" (Ipaddr.V4.to_string t.rule));
       let last_active_time = Unix.gettimeofday () in
       let port = { callback; last_active_time } in
       t.switch.rules <- RuleMap.add t.rule port t.switch.rules;
-      Lwt.return_unit
+      Lwt.return (Ok ())
     let disconnect t =
       Log.debug (fun f -> f "deactivating switch port for %s" (Ipaddr.V4.to_string t.rule));
       t.switch.rules <- RuleMap.remove t.rule t.switch.rules;

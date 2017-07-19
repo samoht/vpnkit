@@ -88,9 +88,8 @@ let unix_bind_one ?(description="") pf ty ip port =
   Lwt.catch
     (fun () ->
       Lwt_unix.setsockopt fd Lwt_unix.SO_REUSEADDR true;
-      Lwt_unix.Versioned.bind_2 fd addr
-      >>= fun () ->
-      Lwt.return (idx, fd)
+      Lwt_unix.bind fd addr >|= fun () ->
+      idx, fd
     ) (fun e ->
       Lwt_unix.close fd
       >>= fun () ->
@@ -170,7 +169,7 @@ module Datagram = struct
         | Ipaddr.V6 _ -> Lwt_unix.PF_INET6, Unix.inet6_addr_any in
       let fd = Lwt_unix.socket pf Lwt_unix.SOCK_DGRAM 0 in
       (* Win32 requires all sockets to be bound however macOS and Linux don't *)
-      Lwt.catch (fun () -> Lwt_unix.Versioned.bind_2 fd (Lwt_unix.ADDR_INET(addr, 0))) (fun _ -> Lwt.return_unit)
+      Lwt.catch (fun () -> Lwt_unix.bind fd (Lwt_unix.ADDR_INET(addr, 0))) (fun _ -> Lwt.return_unit)
       >>= fun () ->
       let sockaddr = sockaddr_of_address address in
       Lwt.return (Result.Ok (of_fd ~idx ~description ?read_buffer_size sockaddr address fd))

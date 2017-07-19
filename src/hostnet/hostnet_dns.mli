@@ -12,13 +12,13 @@ module Config: sig
 end
 
 module Make
-    (Ip: V1_LWT.IPV4 with type prefix = Ipaddr.V4.t)
-    (Udp: V1_LWT.UDPV4)
-    (Tcp:V1_LWT.TCPV4)
+    (Ip: Mirage_protocols_lwt.IPV4)
+    (Udp: Mirage_protocols_lwt.UDPV4)
+    (Tcp: Mirage_protocols_lwt.TCPV4)
     (Socket: Sig.SOCKETS)
     (Dns_resolver: Sig.DNS)
-    (Time: V1_LWT.TIME)
-    (Clock: V1.CLOCK)
+    (Time: Mirage_time_lwt.S)
+    (Clock: Mirage_clock_lwt.MCLOCK)
     (Recorder: Sig.RECORDER) : sig
 
   type t
