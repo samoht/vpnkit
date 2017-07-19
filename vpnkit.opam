@@ -1,16 +1,16 @@
 opam-version: "1.2"
 maintainer: "David Scott <dave.scott@docker.com>"
 authors: [
-	"Anil Madhavapeddy <anil@recoil.org>"
-	"David Scott <dave.scott@docker.com>"
-	"David Sheets <dsheets@docker.com>"
-	"Gaetan de Villele <gdevillele@gmail.com>"
-	"Ian Campbell <ian.campbell@docker.com>"
-	"Magnus Skjegstad <magnus@skjegstad.com>"
-	"Mindy Preston <mindy.preston@docker.com>"
-	"Sebastiaan van Stijn <github@gone.nl>"
-	"Thomas Gazagnaire <thomas@gazagnaire.com>"
-	"Thomas Leonard <thomas.leonard@docker.com>"
+  "Anil Madhavapeddy <anil@recoil.org>"
+  "David Scott <dave.scott@docker.com>"
+  "David Sheets <dsheets@docker.com>"
+  "Gaetan de Villele <gdevillele@gmail.com>"
+  "Ian Campbell <ian.campbell@docker.com>"
+  "Magnus Skjegstad <magnus@skjegstad.com>"
+  "Mindy Preston <mindy.preston@docker.com>"
+  "Sebastiaan van Stijn <github@gone.nl>"
+  "Thomas Gazagnaire <thomas@gazagnaire.com>"
+  "Thomas Leonard <thomas.leonard@docker.com>"
 ]
 homepage:     "https://github.com/docker/vpnkit"
 bug-reports:  "https://github.com/docker/vpnkit/issues"
@@ -18,47 +18,46 @@ dev-repo:     "https://github.com/docker/vpnkit.git"
 doc:          "https://docker.github.io/vpnkit/"
 
 build: [
-  [make]
+  ["jbuilder" "subst"] {pinned}
+  ["jbuilder" "build" "-j" jobs]
 ]
 build-test: [
-  [make "test"]
+  ["jbuilder" "runtest"]
 ]
-install: [make "install" "BINDIR=%{bin}%"]
-remove: [make "uninstall" "BINDIR=%{bin}%"]
 
 depends: [
-  "ocamlfind"  {build}
-  "jbuilder"   {build}
+  "jbuilder"   {build & >= "1.0+beta10"}
   "alcotest"   {test}
   "result"
-  "tar-format" {= "0.6.1"}
+  "tar-format" {>= "0.6.1"}
   "ipaddr"
-  "lwt" { >= "2.7.0" }
-  "uwt" { >= "0.0.4" }
-  "tcpip" { >= "2.8.0" & < "3.0.0" }
+  "lwt" {>= "2.7.0" }
+  "uwt" {>= "0.0.4" }
+  "tcpip" {>= "3.1.4" }
   "pcap-format"
-  "dns"
-  "dnssd" { >= "0.2" }
+  "dns" {>= "0.19.1"}
+  "dnssd" {>= "0.2" }
   "dns-forward"
   "datakit-server"
-  "hashcons" {= "1.0.1"}
-  "pcap-format" { >= "0.4.0" }
+  "hashcons" {>= "1.0.1"}
+  "pcap-format" {>= "0.4.0" }
   "cmdliner"
-  "charrua-core" { >= "0.3" }
-  "named-pipe" { >= "0.4.0" }
-  "hvsock" { >= "0.13.0" }
+  "charrua-core" {>= "0.3" }
+  "named-pipe" {>= "0.4.0" }
+  "hvsock" {>= "0.13.0" }
   "asl"
   "win-eventlog"
   "fd-send-recv"
   "logs"
   "fmt"
   "astring"
-  "mirage-flow" { >= "1.1.0" }
+  "mirage-flow" {>= "1.1.0" }
   "mirage-http"
-  "cohttp"
-  "channel"
-  "mirage-types-lwt"
-  "mirage-vnetif" { = "0.2.0" }
+  "cohttp" {>= "0.22.0"}
+  "mirage-protocols" {>= "1.1.0" }
+  "channel" {>= "1.1.1"}
+  "protocol-9p" {>= "0.11.2"}
+  "mirage-vnetif" {>= "0.4.0" }
   "uuidm"
   "ezjsonm"
 ]
