@@ -1,5 +1,3 @@
-module Lwt_result = Hostnet_lwt_result (* remove when new Lwt is released *)
-
 open Lwt
 
 let src =
@@ -89,7 +87,7 @@ module Command = struct
                 Result.Ok (Ethernet uuid, rest)
               end
               | None -> Result.Error (`Msg (Printf.sprintf "Invalid UUID: %s" uuid_str))
-          in 
+          in
           result
       end
     | n -> Result.Error (`Msg (Printf.sprintf "Unknown command: %d" n))
@@ -115,7 +113,7 @@ module Vif = struct
   let marshal t rest =
     Cstruct.LE.set_uint16 rest 0 t.mtu;
     Cstruct.LE.set_uint16 rest 2 t.max_packet_size;
-    Cstruct.blit_from_bytes (Macaddr.to_bytes t.client_macaddr) 0 rest 4 6; 
+    Cstruct.blit_from_bytes (Macaddr.to_bytes t.client_macaddr) 0 rest 4 6;
     Cstruct.shift rest sizeof
 
   let unmarshal rest =
@@ -143,18 +141,11 @@ end
 
 module Make(C: Sig.CONN) = struct
 
-module Channel = Channel.Make(C)
-
-type stats = {
-  mutable rx_bytes: int64;
-  mutable rx_pkts: int32;
-  mutable tx_bytes: int64;
-  mutable tx_pkts: int32;
-}
+module Channel = Mirage_channel_lwt.Make(C)
 
 type t = {
   mutable fd: Channel.t option;
-  stats: stats;
+  stats: Mirage_net.stats;
   client_uuid: Uuidm.t;
   client_macaddr: Macaddr.t;
   server_macaddr: Macaddr.t;
@@ -171,7 +162,10 @@ type t = {
 }
 
 
-let error_of_failure f = Lwt.catch f (fun e -> Lwt_result.fail (`Msg (Printexc.to_string e)))
+let errorf_of_failure f =
+  Lwt.catch f (fun e -> Lwt_result.fail (`Msg (Printexc.to_string e)))
+
+let errorf fmt = Fmt.kstrf Lwt.fail_with fmt
 
 exception Disconnected
 
@@ -188,9 +182,10 @@ let get_client_macaddr t =
 let server_negotiate ~fd ~client_macaddr_of_uuid ~mtu =
   error_of_failure
     (fun () ->
-      Channel.read_exactly ~len:Init.sizeof fd
-      >>= fun bufs ->
-      let buf = Cstruct.concat bufs in
+       Channel.read_exactly ~len:Init.sizeof fd >>= function
+       | Error e -> Lwt.return (Error e)
+       | Ok (`Data bufs) ->
+         let buf = Cstruct.concat bufs in
       let open Lwt_result.Infix in
       Lwt.return (Init.unmarshal buf)
       >>= fun (init, _) ->
@@ -325,29 +320,27 @@ let make ~client_macaddr ~server_macaddr ~mtu ~client_uuid fd =
 type fd = C.flow
 
 let of_fd ~client_macaddr_of_uuid ~server_macaddr ~mtu flow =
-  let open Lwt_result.Infix in
   let channel = Channel.create flow in
-  server_negotiate ~fd:channel ~client_macaddr_of_uuid ~mtu >>= fun (client_uuid, client_macaddr) ->
-  let t = make ~client_macaddr ~server_macaddr ~mtu ~client_uuid channel in
-  Lwt_result.return t
+  server_negotiate ~fd:channel ~client_macaddr_of_uuid ~mtu >|= fun (client_uuid, client_macaddr) ->
+  make ~client_macaddr ~server_macaddr ~mtu ~client_uuid channel
 
 let client_of_fd ~uuid ~server_macaddr flow =
-  let open Lwt_result.Infix in
   let channel = Channel.create flow in
-  client_negotiate ~uuid ~fd:channel
-  >>= fun vif ->
-  let t = make ~client_macaddr:vif.Vif.client_macaddr ~server_macaddr:server_macaddr ~mtu:vif.Vif.mtu ~client_uuid:uuid channel in
-  Lwt_result.return t
+  client_negotiate ~uuid ~fd:channel >|= fun vif ->
+  make
+    ~client_macaddr:vif.Vif.client_macaddr
+    ~server_macaddr:server_macaddr
+    ~mtu:vif.Vif.mtu
+    ~client_uuid:uuid
+    channel
 
 let disconnect t = match t.fd with
   | None -> Lwt.return ()
   | Some fd ->
     t.fd <- None;
     Log.debug (fun f -> f "Vmnet.disconnect flushing channel");
-    Channel.flush fd
-    >>= fun () ->
-    Lwt.wakeup_later t.after_disconnect_u ();
-    Lwt.return ()
+    Channel.flush fd >|= fun _ ->
+    Lwt.wakeup_later t.after_disconnect_u ()
 
 let after_disconnect t = t.after_disconnect
 

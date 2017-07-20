@@ -7,8 +7,6 @@ module Make(Ethif: Mirage_net_lwt.S): sig
 
   type ethif = Ethif.t
 
-  val connect:
-    table:(ipaddr * macaddr) list -> ethif
-    -> [ `Ok of t | `Error of error ] Lwt.t
+  val connect: table:(ipaddr * macaddr) list -> ethif -> t
   (** Construct a static ARP table *)
 end

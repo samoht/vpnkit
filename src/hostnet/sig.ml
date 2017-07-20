@@ -11,8 +11,8 @@ module type FLOW_CLIENT = sig
 
   type address
 
-  val connect: ?read_buffer_size:int -> address
-    -> flow Error.t
+  val connect: ?read_buffer_size:int -> address ->
+    (flow, [`Msg of string]) result Lwt.t
   (** [connect address] creates a connection to [address] and returns
       he connected flow. *)
 end
@@ -66,8 +66,10 @@ module type SOCKETS = sig
   (** TODO: hide these by refactoring Hyper-V sockets stuff *)
   val register_connection: string -> int Lwt.t
   val deregister_connection: int -> unit
+
   val get_num_connections: unit -> int
   (** Fetch the number of tracked connections *)
+
   val connections: unit -> Vfs.File.t
   (** A filesystem which allows the connections to be introspected *)
 
@@ -134,12 +136,12 @@ end
 module type FILES = sig
   (** An OS-based file reading implementation *)
 
-  val read_file: string -> string Error.t
+  val read_file: string -> (string, [`Msg of string]) result Lwt.t
   (** Read a whole file into a string *)
 
   type watch
 
-  val watch_file: string -> (unit -> unit) -> (watch, [ `Msg of string ]) Result.result
+  val watch_file: string -> (unit -> unit) -> (watch, [ `Msg of string ]) result
   (** [watch_file path callback] executes [callback] whenever the contents of
       [path] may have changed. *)
 
@@ -165,7 +167,6 @@ module type HOST = sig
   end
 
   module Time: Mirage_time_lwt.S
-  module Clock: Mirage_clock_lwt.MCLOCK
 
   module Dns: sig
     include DNS
@@ -207,8 +208,11 @@ module type VMNET = sig
 
   type fd
 
-  val of_fd: client_macaddr_of_uuid:(Uuidm.t -> Macaddr.t Lwt.t) -> server_macaddr:Macaddr.t
-    -> mtu:int -> fd -> t Error.t
+  val of_fd:
+    client_macaddr_of_uuid:(Uuidm.t -> Macaddr.t Lwt.t) ->
+    server_macaddr:Macaddr.t ->
+    mtu:int ->
+    fd -> t Lwt.t
 
   val start_capture: t -> ?size_limit:int64 -> string -> unit Lwt.t
 

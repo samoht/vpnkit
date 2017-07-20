@@ -1,4 +1,3 @@
-
 type pcap = (string * int64 option) option
 (** Packet capture configuration. None means don't capture; Some (file, limit)
     means write pcap-formatted data to file. If the limit is None then the
@@ -32,9 +31,17 @@ type config = {
 
 (** A slirp TCP/IP stack ready to accept connections *)
 
-module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLICY)(Host: Sig.HOST)(Vnet : Vnetif.BACKEND) : sig
+module Make
+    (Config: Active_config.S)
+    (Vmnet: Sig.VMNET)
+    (Dns_policy: Sig.DNS_POLICY)
+    (Host: Sig.HOST)
+    (Clock: Mirage_clock_lwt.MCLOCK)
+    (Random: Mirage_random.C)
+    (Vnet: Vnetif.BACKEND) :
+sig
 
-  val create: ?host_names:Dns.Name.t list -> Config.t -> config Lwt.t
+  val create: ?host_names:Dns.Name.t list -> Config.t -> Clock.t -> config Lwt.t
   (** Initialise a TCP/IP stack, taking configuration from the Config.t *)
 
   type t
@@ -55,13 +62,15 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     val get_nat_table_size: t -> int
     (** Return the number of active NAT table entries *)
 
-    val update_dns: ?local_ip:Ipaddr.t -> ?host_names:Dns.Name.t list -> unit -> unit
+    val update_dns: ?local_ip:Ipaddr.t -> ?host_names:Dns.Name.t list ->
+      unit -> unit Lwt.t
     (** Update the DNS forwarder following a configuration change *)
 
-    val update_http: ?http:string -> ?https:string -> ?exclude:string -> unit -> unit Error.t
+    val update_http: ?http:string -> ?https:string -> ?exclude:string ->
+      unit -> unit Lwt.t
     (** Update the HTTP forwarder following a configuration change *)
 
-    val update_http_json: Ezjsonm.value -> unit -> unit Error.t
+    val update_http_json: Ezjsonm.value -> unit -> unit Lwt.t
     (** Update the HTTP forwarder using the json interface *)
   end
 end

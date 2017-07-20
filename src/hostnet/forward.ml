@@ -107,20 +107,22 @@ let write_forwarding_header description remote remote_port =
   Cstruct.blit_from_string ip 0 header 3 4;
   Cstruct.LE.set_uint16 header 7 port;
   (* Write the header, we should be connected to the container port *)
-  Connector.write remote header
-  >>= function
-  | `Error e ->
-    let msg = Printf.sprintf "%s: failed to write forwarding header: %s" description (Connector.error_message e) in
-    Log.err (fun f -> f "%s" msg);
-    Lwt.fail (Failure msg)
-  | `Eof ->
+  Connector.write remote header >>= function
+  | Error `Closed ->
     let msg = Printf.sprintf "%s: EOF writing forwarding header" description in
     Log.err (fun f -> f "%s" msg);
     Lwt.fail (Failure msg)
-  | `Ok () ->
+  | Error e ->
+    let msg = Fmt.strf "%s: failed to write forwarding header: %a" description Connector.pp_write_error e in
+    Log.err (fun f -> f "%s" msg);
+    Lwt.fail (Failure msg)
+  | Ok () ->
     Lwt.return_unit
 
+module Proxy = Mirage_flow_lwt.Proxy(Mclock)(Connector)(Socket.Stream.Tcp)
+
 let start_tcp_proxy description vsock_path_var remote_port server =
+  Mclock.connect () >>= fun clock ->
   Socket.Stream.Tcp.listen server
     (fun local ->
       Active_list.Var.read vsock_path_var
@@ -132,15 +134,15 @@ let start_tcp_proxy description vsock_path_var remote_port server =
           write_forwarding_header description remote remote_port
           >>= fun () ->
           Log.debug (fun f -> f "%s: connected" description);
-          Mirage_flow.proxy (module Clock) (module Connector) remote (module Socket.Stream.Tcp) local ()
+          Proxy.proxy clock remote local
           >>= function
-          | `Error (`Msg m) ->
-            Log.err (fun f -> f "%s proxy failed with %s" description m);
+          | Error e ->
+            Log.err (fun f -> f "%s proxy failed with %a" description Proxy.pp_error e);
             Lwt.return ()
-          | `Ok (l_stats, r_stats) ->
+          | Ok (l_stats, r_stats) ->
             Log.debug (fun f ->
-                f "%s completed: l2r = %s; r2l = %s" description
-                  (Mirage_flow.CopyStats.to_string l_stats) (Mirage_flow.CopyStats.to_string r_stats)
+                f "%s completed: l2r = %a; r2l = %a" description
+                  Mirage_flow.pp_stats l_stats Mirage_flow.pp_stats r_stats
               );
             Lwt.return ()
         ) (fun () ->
@@ -153,19 +155,17 @@ let max_vsock_header_length = 1024
 
 let conn_read flow buf =
   let open Lwt.Infix in
-  Connector.read_into flow buf
-  >>= function
-  | `Eof -> Lwt.fail End_of_file
-  | `Error e -> Lwt.fail (Failure (Connector.error_message e))
-  | `Ok () -> Lwt.return ()
+  Connector.read_into flow buf >>= function
+  | Ok `Eof       -> Lwt.fail End_of_file
+  | Error e       -> Fmt.kstrf Lwt.fail_with "%a" Connector.pp_error e
+  | Ok (`Data ()) -> Lwt.return ()
 
 let conn_write flow buf =
   let open Lwt.Infix in
-  Connector.write flow buf
-  >>= function
-  | `Eof -> Lwt.fail End_of_file
-  | `Error e -> Lwt.fail (Failure (Connector.error_message e))
-  | `Ok () -> Lwt.return ()
+  Connector.write flow buf >>= function
+  | Error `Closed -> Lwt.fail End_of_file
+  | Error e       -> Fmt.kstrf Lwt.fail_with "%a" Connector.pp_write_error e
+  | Ok ()         -> Lwt.return ()
 
 let start_udp_proxy description vsock_path_var remote_port server =
   let open Lwt.Infix in

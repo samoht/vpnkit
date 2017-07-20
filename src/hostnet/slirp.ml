@@ -1,4 +1,4 @@
-open Lwt
+open Lwt.Infix
 
 let src =
   let src = Logs.Src.create "usernet" ~doc:"Mirage TCP/IP <-> socket proxy" in
@@ -49,8 +49,8 @@ let or_failwith name m =
 
 let or_failwith_result name m =
   m >>= function
-  | Result.Error _ -> Lwt.fail (Failure (Printf.sprintf "Failed to connect %s device" name))
-  | Result.Ok x -> Lwt.return x
+  | Error _ -> Lwt.fail (Failure (Printf.sprintf "Failed to connect %s device" name))
+  | Ok x -> Lwt.return x
 
 let or_error name m =
   m >>= function
@@ -96,26 +96,33 @@ type config = {
   host_names: Dns.Name.t list;
 }
 
-module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLICY)(Host: Sig.HOST)(Vnet : Vnetif.BACKEND with type macaddr = Macaddr.t) = struct
+module Make
+    (Config: Active_config.S)
+    (Vmnet: Sig.VMNET)
+    (Dns_policy: Sig.DNS_POLICY)
+    (Host: Sig.HOST)
+    (Clock: Mirage_clock_lwt.MCLOCK)
+    (Random: Mirage_random.C)
+    (Vnet : Vnetif.BACKEND with type macaddr = Macaddr.t) =
+struct
   (* module Tcpip_stack = Tcpip_stack.Make(Vmnet)(Host.Time) *)
 
   module Filteredif = Filter.Make(Vmnet)
   module Netif = Capture.Make(Filteredif)
   module Recorder = (Netif: Sig.RECORDER with type t = Netif.t)
   module Switch = Mux.Make(Netif)
-  module Dhcp = Dhcp.Make(Switch)
+  module Dhcp = Dhcp.Make(Clock)(Switch)
 
   (* This ARP implementation will respond to the VM: *)
-  module Global_arp_ethif = Ethif.Make(Switch)
-  module Global_arp = Arp.Make(Global_arp_ethif)
+  module Global_arp = Arp.Make(Switch)
 
   (* This stack will attach to a switch port and represent a single remote IP *)
   module Stack_ethif = Ethif.Make(Switch.Port)
-  module Stack_arpv4 = Arp.Make(Stack_ethif)
-  module Stack_ipv4 = Ipv4.Make(Stack_ethif)(Stack_arpv4)
+  module Stack_arpv4 = Arp.Make(Switch.Port)
+  module Stack_ipv4 = Static_ipv4.Make(Stack_ethif)(Stack_arpv4)
   module Stack_icmpv4 = Icmpv4.Make(Stack_ipv4)
   module Stack_tcp_wire = Tcp.Wire.Make(Stack_ipv4)
-  module Stack_udp = Udp.Make(Stack_ipv4)
+  module Stack_udp = Udp.Make(Stack_ipv4)(Random)
   module Stack_tcp = struct
     include Tcp.Flow.Make(Stack_ipv4)(Host.Time)(Clock)(Random)
     let shutdown_read _flow =
@@ -126,10 +133,15 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     let shutdown_write = close
   end
 
-  module Dns_forwarder = Hostnet_dns.Make(Stack_ipv4)(Stack_udp)(Stack_tcp)(Host.Sockets)(Host.Dns)(Host.Time)(Host.Clock)(Recorder)
-  module Http_forwarder = Hostnet_http.Make(Stack_ipv4)(Stack_udp)(Stack_tcp)(Host.Sockets)(Host.Dns)
+  module Dns_forwarder =
+    Hostnet_dns.Make
+      (Stack_ipv4)(Stack_udp)(Stack_tcp)(Host.Sockets)(Host.Dns)
+      (Host.Time)(Clock)(Recorder)
 
-  module Udp_nat = Hostnet_udp.Make(Host.Sockets)(Host.Time)
+  module Http_forwarder =
+    Hostnet_http.Make(Stack_ipv4)(Stack_udp)(Stack_tcp)(Host.Sockets)(Host.Dns)
+
+  module Udp_nat = Hostnet_udp.Make(Host.Sockets)(Clock)(Host.Time)
 
   (* Global variable containing the global DNS configuration *)
   let dns =
@@ -154,28 +166,29 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     | _ -> false
 
   let string_of_id id =
-    Printf.sprintf "TCP %s:%d > %s:%d"
-      (Ipaddr.V4.to_string id.Stack_tcp_wire.dest_ip) id.Stack_tcp_wire.dest_port
-      (Ipaddr.V4.to_string id.Stack_tcp_wire.local_ip) id.Stack_tcp_wire.local_port
+    let local_port = Stack_tcp_wire.src_port_of_id id in
+    let dest_ip, dest_port = Stack_tcp_wire.dst_of_id id in
+    let open Tcp.Tcp_wire in
+    Printf.sprintf "TCP %s:%d > %d"
+      (Ipaddr.V4.to_string dest_ip) dest_port local_port
 
   module Tcp = struct
 
     module Id = struct
       module M = struct
         type t = Stack_tcp_wire.id
-        let compare
-            { Stack_tcp_wire.local_ip = local_ip1; local_port = local_port1; dest_ip = dest_ip1; dest_port = dest_port1 }
-            { Stack_tcp_wire.local_ip = local_ip2; local_port = local_port2; dest_ip = dest_ip2; dest_port = dest_port2 } =
+        let compare id1 id2 =
+          let dest_ip1, dest_port1 = Stack_tcp_wire.dst_of_id id1 in
+          let dest_ip2, dest_port2 = Stack_tcp_wire.dst_of_id id2 in
+          let local_port1 = Stack_tcp_wire.src_port_of_id id1 in
+          let local_port2 = Stack_tcp_wire.src_port_of_id id2 in
           let dest_ip' = Ipaddr.V4.compare dest_ip1 dest_ip2 in
-          let local_ip' = Ipaddr.V4.compare local_ip1 local_ip2 in
           let dest_port' = compare dest_port1 dest_port2 in
           let local_port' = compare local_port1 local_port2 in
           if dest_port' <> 0
           then dest_port'
           else if dest_ip' <> 0
           then dest_ip'
-          else if local_ip' <> 0
-          then local_ip'
           else local_port'
       end
       include M
@@ -238,21 +251,14 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     let touch t =
       t.last_active_time <- Unix.gettimeofday ()
 
-    let create recorder switch arp_table ip mtu =
+    let create recorder switch arp_table ip mtu clock =
       let netif = Switch.port switch ip in
-      let open Infix in
-      or_error "Stack_ethif.connect" @@ Stack_ethif.connect ~mtu netif
-      >>= fun ethif ->
-      or_error "Stack_arpv4.connect" @@ Stack_arpv4.connect ~table:arp_table ethif
-      >>= fun arp ->
-      or_error "Stack_ipv4.connect" @@ Stack_ipv4.connect ethif arp
-      >>= fun ipv4 ->
-      or_error "Stack_icmpv4.connect" @@ Stack_icmpv4.connect ipv4
-      >>= fun icmpv4 ->
-      or_error "Stack_udp.connect" @@ Stack_udp.connect ipv4
-      >>= fun udp4 ->
-      or_error "Stack_tcp.connect" @@ Stack_tcp.connect ipv4
-      >>= fun tcp4 ->
+      Stack_ethif.connect ~mtu netif >>= fun ethif ->
+      let arp = Stack_arpv4.connect ~table:arp_table netif in
+      Stack_ipv4.connect ethif arp >>= fun ipv4 ->
+      Stack_icmpv4.connect ipv4 >>= fun icmpv4 ->
+      Stack_udp.connect ipv4 >>= fun udp4 ->
+      Stack_tcp.connect ipv4 clock >>= fun tcp4 ->
 
       let open Lwt.Infix in
       Stack_ipv4.set_ip ipv4 ip (* I am the destination *)
@@ -296,10 +302,10 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
         (fun () ->
           Host.Sockets.Stream.Tcp.connect (ip, port)
           >>= function
-          | Result.Error (`Msg m) ->
+          | Error (`Msg m) ->
             Log.debug (fun f -> f "%s:%d: failed to connect, sending RST: %s" (Ipaddr.to_string ip) port m);
             Lwt.return (fun _ -> None)
-          | Result.Ok socket ->
+          | Ok socket ->
             let t = Tcp.Flow.create id socket in
             let listeners port =
               Log.debug (fun f -> f "%s:%d handshake complete" (Ipaddr.to_string ip) port);
@@ -568,8 +574,8 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
 
     (* Operator which logs Vfs errors and returns *)
     let (>>?=) m f = m >>= function
-      | Result.Ok x -> f x
-      | Result.Error err ->
+      | Ok x -> f x
+      | Error err ->
         Log.err (fun l -> l "diagnostics error: %a" Vfs.Error.pp err);
         Lwt.return_unit in
 
@@ -627,20 +633,12 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
       dns := Dns_forwarder.create ~local_address ~host_names (Dns_policy.config ())
 
     let update_http ?http:http_config ?https ?exclude () =
-      Http_forwarder.create ?http:http_config ?https ?exclude ()
-      >>= function
-      | Error e -> Lwt.return (Error e)
-      | Ok h ->
-        http := Some h;
-        Lwt.return (Ok ())
+      Http_forwarder.create ?http:http_config ?https ?exclude () >|= fun h ->
+      http := Some h
 
     let update_http_json j () =
-      Http_forwarder.of_json j
-      >>= function
-      | Error e -> Lwt.return (Error e)
-      | Ok h ->
-        http := Some h;
-        Lwt.return (Ok ())
+      Http_forwarder.of_json j >|- fun h ->
+      http := Some h
   end
 
   (* If no traffic is received for 5 minutes, delete the endpoint and
@@ -839,9 +837,8 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     Log.info (fun f -> f "TCP/IP ready");
     Lwt.return t
 
-  let create ?(host_names = [ Dns.Name.of_string "vpnkit.host" ]) config =
+  let create ?(host_names = [ Dns.Name.of_string "vpnkit.host" ]) config clock =
     let driver = [ "com.docker.driver.amd64-linux" ] in
-
     let max_connections_path = driver @ [ "slirp"; "max-connections" ] in
     Config.string_option config max_connections_path
     >>= fun string_max_connections ->
@@ -850,24 +847,28 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
       | Some x -> Lwt.return (
           try Some (int_of_string @@ String.trim x)
           with _ ->
-            Log.err (fun f -> f "Failed to parse slirp/max-connections value: '%s'" x);
+            Log.err (fun f -> f "Failed to parse slirp/max-connections value: \
+                                 '%s'" x);
             None
-        ) in
+        )
+    in
     Active_config.map parse_max string_max_connections
     >>= fun max_connections ->
     let rec monitor_max_connections_settings settings =
-      begin match Active_config.hd settings with
-        | None ->
-          Log.info (fun f -> f "remove connection limit");
-          Host.Sockets.set_max_connections None
-        | Some limit ->
-          Log.info (fun f -> f "updating connection limit to %d" limit);
-          Host.Sockets.set_max_connections (Some limit)
-      end;
-      Active_config.tl settings
-      >>= fun settings ->
-      monitor_max_connections_settings settings in
-    Lwt.async (fun () -> log_exception_continue "monitor max connections settings" (fun () -> monitor_max_connections_settings max_connections));
+      (match Active_config.hd settings with
+       | None ->
+         Log.info (fun f -> f "remove connection limit");
+         Host.Sockets.set_max_connections None
+       | Some limit ->
+         Log.info (fun f -> f "updating connection limit to %d" limit);
+         Host.Sockets.set_max_connections (Some limit));
+      Active_config.tl settings >>= fun settings ->
+      monitor_max_connections_settings settings
+    in
+    Lwt.async (fun () ->
+        log_exception_continue "monitor max connections settings" (fun () ->
+            monitor_max_connections_settings max_connections)
+      );
 
     (* TODO Don't hardcode this *)
     let server_macaddr = default_server_macaddr in
@@ -876,20 +877,17 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     let domain_search = ref [] in
     let get_domain_search () = !domain_search in
     let dns_path = driver @ [ "slirp"; "dns" ] in
-    Config.string_option config dns_path
-    >>= fun string_dns_settings ->
-    Active_config.map
-      (function
+    Config.string_option config dns_path >>= fun string_dns_settings ->
+    Active_config.map (function
         | Some txt ->
           let open Dns_forward in
-          begin match Config.of_string txt with
-          | Result.Ok config ->
-            domain_search := config.Config.search;
-            Lwt.return (Some config)
-          | Result.Error (`Msg m) ->
-            Log.err (fun f -> f "failed to parse %s: %s" (String.concat "/" dns_path) m);
-            Lwt.return None
-          end
+          (match Config.of_string txt with
+           | Ok config ->
+             domain_search := config.Config.search;
+             Lwt.return (Some config)
+           | Error (`Msg m) ->
+             Log.err (fun f -> f "failed to parse %s: %s" (String.concat "/" dns_path) m);
+             Lwt.return None)
         | None ->
           Lwt.return None
       ) string_dns_settings
@@ -897,8 +895,7 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     let resolver_path = driver @ [ "slirp"; "resolver" ] in
     Config.string_option config resolver_path
     >>= fun string_resolver_settings ->
-    Active_config.map
-      (function
+    Active_config.map (function
         | Some "host" -> Lwt.return `Host
         | _ -> Lwt.return `Upstream
       ) string_resolver_settings
@@ -909,10 +906,8 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
     let domain_name_path = driver @ [ "slirp"; "domain" ] in
     Config.string config ~default:(!domain_name) domain_name_path
     >>= fun domain_name_settings ->
-    Lwt.async
-      (fun () ->
-        Active_config.iter
-          (fun x ->
+    Lwt.async (fun () ->
+        Active_config.iter (fun x ->
             domain_name := x;
             Lwt.return_unit
           ) domain_name_settings
@@ -945,150 +940,188 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
       Active_config.tl allowed_bind_address
       >>= fun allowed_bind_address ->
       monitor_allowed_bind_settings allowed_bind_address in
-    Lwt.async (fun () -> log_exception_continue "monitor_allowed_bind_settings" (fun () -> monitor_allowed_bind_settings allowed_bind_address));
+    Lwt.async (fun () ->
+        log_exception_continue "monitor_allowed_bind_settings" (fun () ->
+            monitor_allowed_bind_settings allowed_bind_address));
 
     let peer_ips_path = driver @ [ "slirp"; "docker" ] in
     let parse_ipv4 default x = match Ipaddr.V4.of_string @@ String.trim x with
       | None ->
-        Log.err (fun f -> f "Failed to parse IPv4 address '%s', using default of %s" x (Ipaddr.V4.to_string default));
+        Log.err (fun f -> f "Failed to parse IPv4 address '%s', using default \
+                             of %s" x (Ipaddr.V4.to_string default));
         Lwt.return default
-      | Some x -> Lwt.return x in
+      | Some x -> Lwt.return x
+    in
     let parse_ipv4_list default x =
-      let all = List.map Ipaddr.V4.of_string @@ List.filter (fun x -> x <> "") @@ List.map String.trim @@ Astring.String.cuts ~sep:"," x in
-      let any_none, some = List.fold_left (fun (any_none, some) x -> match x with
-          | None -> true, some
-          | Some x -> any_none, x :: some
-        ) (false, []) all in
-      if any_none then begin
-        Log.err (fun f -> f "Failed to parse IPv4 address list '%s', using default of %s" x (String.concat "," (List.map Ipaddr.V4.to_string default)));
+      let all =
+        List.map Ipaddr.V4.of_string @@
+        List.filter (fun x -> x <> "") @@
+        List.map String.trim @@
+        Astring.String.cuts ~sep:"," x
+      in
+      let any_none, some =
+        List.fold_left (fun (any_none, some) x -> match x with
+            | None -> true, some
+            | Some x -> any_none, x :: some
+          ) (false, []) all in
+      if any_none then (
+        Log.err (fun f -> f "Failed to parse IPv4 address list '%s', using \
+                             default of %s" x
+                    (String.concat "," (List.map Ipaddr.V4.to_string default)));
         Lwt.return default
-      end else Lwt.return some in
+      ) else Lwt.return some
+    in
 
     Config.string config ~default:default_peer peer_ips_path
     >>= fun string_peer_ips ->
-    Active_config.map (parse_ipv4 (Ipaddr.V4.of_string_exn default_peer)) string_peer_ips
+    Active_config.map
+      (parse_ipv4 (Ipaddr.V4.of_string_exn default_peer)) string_peer_ips
     >>= fun peer_ips ->
-    Lwt.async (fun () -> restart_on_change "slirp/docker" Ipaddr.V4.to_string peer_ips);
+    Lwt.async (fun () ->
+        restart_on_change "slirp/docker" Ipaddr.V4.to_string peer_ips);
 
     let host_ips_path = driver @ [ "slirp"; "host" ] in
     Config.string config ~default:default_host host_ips_path
     >>= fun string_host_ips ->
-    Active_config.map (parse_ipv4 (Ipaddr.V4.of_string_exn default_host)) string_host_ips
+    Active_config.map
+      (parse_ipv4 (Ipaddr.V4.of_string_exn default_host)) string_host_ips
     >>= fun host_ips ->
-    Lwt.async (fun () -> restart_on_change "slirp/host" Ipaddr.V4.to_string host_ips);
+    Lwt.async (fun () ->
+        restart_on_change "slirp/host" Ipaddr.V4.to_string host_ips);
 
     let highest_ips_path = driver @ [ "slirp"; "highest-ip" ] in
     Config.string config ~default:"" highest_ips_path
     >>= fun string_highest_ips ->
     Active_config.map (parse_ipv4 default_highest_ip) string_highest_ips
     >>= fun highest_ips ->
-    Lwt.async (fun () -> restart_on_change "slirp/highest-ips" Ipaddr.V4.to_string highest_ips);
+    Lwt.async (fun () ->
+        restart_on_change "slirp/highest-ips" Ipaddr.V4.to_string highest_ips);
 
     let extra_dns_ips_path = driver @ [ "slirp"; "extra_dns" ] in
-    Config.string config ~default:(String.concat "," default_dns_extra) extra_dns_ips_path
+    Config.string config
+      ~default:(String.concat "," default_dns_extra) extra_dns_ips_path
     >>= fun string_extra_dns_ips ->
-    Active_config.map (parse_ipv4_list (List.map Ipaddr.V4.of_string_exn default_dns_extra)) string_extra_dns_ips
+    Active_config.map
+      (parse_ipv4_list (List.map Ipaddr.V4.of_string_exn default_dns_extra))
+      string_extra_dns_ips
     >>= fun extra_dns_ips ->
-    Lwt.async (fun () -> restart_on_change "slirp/extra_dns" (fun x -> String.concat "," (List.map Ipaddr.V4.to_string x)) extra_dns_ips);
+    Lwt.async (fun () ->
+        restart_on_change "slirp/extra_dns"
+          (fun x -> String.concat "," (List.map Ipaddr.V4.to_string x))
+          extra_dns_ips);
 
     let peer_ip = Active_config.hd peer_ips in
     let local_ip = Active_config.hd host_ips in
     let highest_ip = Active_config.hd highest_ips in
     let extra_dns_ip = Active_config.hd extra_dns_ips in
 
-    let upstream_servers = ref Dns_forward.Config.({servers = Server.Set.empty; search = []; assume_offline_after_drops = None }) in
+    let upstream_servers =
+      ref Dns_forward.Config.({servers = Server.Set.empty;
+                               search = []; assume_offline_after_drops = None })
+    in
     let resolver = ref `Upstream in
     let update_dns () =
       let config = match !resolver, !upstream_servers with
         | `Upstream, servers -> `Upstream servers
-        | `Host, _ -> `Host in
+        | `Host, _ -> `Host
+      in
       Log.info (fun f -> f "updating resolvers to %s" (Hostnet_dns.Config.to_string config));
       !dns >>= fun t ->
-      Dns_forwarder.destroy t
-      >>= fun () ->
+      Dns_forwarder.destroy t >>= fun () ->
       Dns_policy.remove ~priority:3;
       Dns_policy.add ~priority:3 ~config;
-      let local_address = { Dns_forward.Config.Address.ip = Ipaddr.V4 local_ip; port = 0 } in
-      dns := Dns_forwarder.create ~local_address ~host_names (Dns_policy.config ());
-      Lwt.return_unit in
+      let local_address =
+        { Dns_forward.Config.Address.ip = Ipaddr.V4 local_ip; port = 0 }
+      in
+      dns := Dns_forwarder.create ~local_address ~host_names
+          (Dns_policy.config ());
+      Lwt.return_unit
+    in
 
     let rec monitor_dns_settings settings =
-      begin match Active_config.hd settings with
-        | None ->
-          upstream_servers := Dns_forward.Config.({ servers = Server.Set.empty; search = []; assume_offline_after_drops = None });
-        | Some (servers: Dns_forward.Config.t) ->
-          upstream_servers := servers;
-      end;
-      update_dns ()
-      >>= fun () ->
-      Active_config.tl settings
-      >>= fun settings ->
-      monitor_dns_settings settings in
-    Lwt.async (fun () -> log_exception_continue "monitor upstream server DNS settings" (fun () -> monitor_dns_settings dns_settings));
+      (match Active_config.hd settings with
+       | None ->
+         upstream_servers := Dns_forward.Config.(
+             { servers = Server.Set.empty; search = [];
+               assume_offline_after_drops = None });
+       | Some (servers: Dns_forward.Config.t) ->
+         upstream_servers := servers);
+      update_dns () >>= fun () ->
+      Active_config.tl settings >>= fun settings ->
+      monitor_dns_settings settings
+    in
+    Lwt.async (fun () ->
+        log_exception_continue "monitor upstream server DNS settings"
+          (fun () -> monitor_dns_settings dns_settings));
+
     let rec monitor_resolver_settings settings =
       resolver := Active_config.hd settings;
-      update_dns ()
-      >>= fun () ->
-      Active_config.tl settings
-      >>= fun settings ->
-      monitor_resolver_settings settings in
-    Lwt.async (fun () -> log_exception_continue "monitor upstream DNS resolver settings" (fun () -> monitor_resolver_settings resolver_settings));
+      update_dns () >>= fun () ->
+      Active_config.tl settings >>= fun settings ->
+      monitor_resolver_settings settings
+    in
+    Lwt.async (fun () ->
+        log_exception_continue "monitor upstream DNS resolver settings"
+          (fun () -> monitor_resolver_settings resolver_settings));
 
     let mtu_path = driver @ [ "slirp"; "mtu" ] in
-    Config.int config ~default:default_mtu mtu_path
-    >>= fun mtus ->
+    Config.int config ~default:default_mtu mtu_path >>= fun mtus ->
     Lwt.async (fun () -> restart_on_change "slirp/mtu" string_of_int mtus);
     let mtu = Active_config.hd mtus in
 
     let bridge_connections_path = driver @ [ "slirp"; "bridge-connections" ] in
-    Config.int config ~default:1 bridge_connections_path
-    >>= fun bridge_conn ->
-    Lwt.async (fun () -> restart_on_change "slirp/bridge-connections" string_of_int bridge_conn);
+    Config.int config ~default:1 bridge_connections_path >>= fun bridge_conn ->
+    Lwt.async (fun () ->
+        restart_on_change "slirp/bridge-connections" string_of_int bridge_conn);
     let bridge_connections = ((Active_config.hd bridge_conn) != 0) in
 
     let http_intercept_path = driver @ [ "slirp"; "http-intercept" ] in
     Config.string_option config http_intercept_path
     >>= fun string_http_intercept_settings ->
     let parse_http_intercept = function
-      | None -> Lwt.return None
+      | None     -> Lwt.return None
       | Some txt ->
-        begin match Ezjsonm.from_string txt with
+        match Ezjsonm.from_string txt with
         | exception _ ->
           Log.err (fun f -> f "Failed to parse http-intercept json: %s" txt);
           Lwt.return None
         | j ->
-          Http_forwarder.of_json j
-          >>= function
+          Http_forwarder.of_json j >>= function
           | Error (`Msg m) ->
             Log.err (fun f -> f "Failed to decode http-intercept json: %s" m);
             Lwt.return None
           | Ok t ->
             Lwt.return (Some t)
-        end in
+    in
     Active_config.map parse_http_intercept string_http_intercept_settings
     >>= fun http_intercept_settings ->
     let rec monitor_http_intercept_settings settings =
       http := Active_config.hd settings;
-      ( match !http with
-        | None -> Log.info (fun f -> f "Disabling transparent HTTP redirection")
-        | Some x -> Log.info (fun f -> f "Enabling transparent HTTP redirection to %s" (Http_forwarder.to_string x)) );
-      Active_config.tl settings
-      >>= fun settings ->
+      (match !http with
+       | None   -> Log.info (fun f -> f "Disabling transparent HTTP redirection")
+       | Some x ->
+         Log.info (fun f -> f "Enabling transparent HTTP redirection to %s"
+                      (Http_forwarder.to_string x)));
+      Active_config.tl settings >>= fun settings ->
       monitor_http_intercept_settings settings in
-    Lwt.async (fun () -> log_exception_continue "monitor http interception settings" (fun () -> monitor_http_intercept_settings http_intercept_settings));
+    Lwt.async (fun () ->
+        log_exception_continue "monitor http interception settings" (fun () ->
+            monitor_http_intercept_settings http_intercept_settings));
 
-    Log.info (fun f -> f "Creating slirp server peer_ip:%s local_ip:%s domain_search:%s mtu:%d bridge:%B"
-                 (Ipaddr.V4.to_string peer_ip) (Ipaddr.V4.to_string local_ip)
-                 (String.concat " " !domain_search) mtu bridge_connections
-             );
+    Log.info (fun f ->
+        f "Creating slirp server peer_ip:%s local_ip:%s domain_search:%s \
+           mtu:%d bridge:%B"
+          (Ipaddr.V4.to_string peer_ip) (Ipaddr.V4.to_string local_ip)
+          (String.concat " " !domain_search) mtu bridge_connections
+      );
 
     let global_arp_table : arp_table = {
-        mutex = Lwt_mutex.create();
-        table = [(local_ip, server_macaddr)];
+      mutex = Lwt_mutex.create();
+      table = [(local_ip, server_macaddr)];
     } in
     let client_uuids : uuid_table = {
-        mutex = Lwt_mutex.create();
-        table = Hashtbl.create 50;
+      mutex = Lwt_mutex.create();
+      table = Hashtbl.create 50;
     } in
     let t = {
       server_macaddr;
@@ -1108,76 +1141,82 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
 
   let client_macaddr_of_uuid t first_ip l2_switch (uuid:Uuidm.t) =
     Lwt_mutex.with_lock t.client_uuids.mutex (fun () ->
-        if (Hashtbl.mem t.client_uuids.table uuid) then begin (* uuid already used, get config *)
-            let (ip, l2_client_id) = (Hashtbl.find t.client_uuids.table uuid) in
-            let mac = (Vnet.mac l2_switch l2_client_id) in
-            Log.info (fun f-> f "Reconnecting MAC %s with IP %s" (Macaddr.to_string mac) (Ipaddr.V4.to_string ip));
-            Lwt.return mac (* may raise Not_found if id is unknown to the bridge *)
-        end else begin (* new uuid, register in bridge *)
-            (* register new client on bridge *)
-            or_failwith "l2_switch" @@ Lwt.return @@ Vnet.register l2_switch
-            >>= fun l2_client_id ->
-            let client_macaddr = (Vnet.mac l2_switch l2_client_id) in
+        if (Hashtbl.mem t.client_uuids.table uuid) then (
+          (* uuid already used, get config *)
+          let (ip, l2_client_id) = (Hashtbl.find t.client_uuids.table uuid) in
+          let mac = (Vnet.mac l2_switch l2_client_id) in
+          Log.info (fun f ->
+              f "Reconnecting MAC %s with IP %s"
+                (Macaddr.to_string mac) (Ipaddr.V4.to_string ip));
+          Lwt.return mac
+          (* may raise Not_found if id is unknown to the bridge *)
+        ) else (
+          (* new uuid, register in bridge *)
+          (* register new client on bridge *)
+          or_failwith "l2_switch" @@ Lwt.return @@ Vnet.register l2_switch
+          >>= fun l2_client_id ->
+          let client_macaddr = (Vnet.mac l2_switch l2_client_id) in
 
-            let used_ips =
-                Hashtbl.fold (fun _ v l ->
-                    let ip, _ = v in
-                    l @ [ip]) t.client_uuids.table []
+          let used_ips =
+            Hashtbl.fold (fun _ v l ->
+                let ip, _ = v in
+                l @ [ip]) t.client_uuids.table []
+          in
+
+          (* check if a specific IP is requested *)
+          let preferred_ip =
+            let uuid_bytes = Uuidm.to_bytes uuid in
+            let uuid_prefix =
+              Bytes.sub uuid_bytes 0
+                (Bytes.length default_uuid_preferred_ip_prefix)
             in
+            if (Bytes.compare uuid_prefix default_uuid_preferred_ip_prefix) = 0
+            then (
+              let uuid_suffix = Bytes.sub uuid_bytes 12 4 in
+              let preferred_ip = Ipaddr.V4.of_bytes_exn uuid_suffix in
+              Log.info (fun f ->
+                  f "Client requested IP %a" Ipaddr.V4.pp_hum preferred_ip);
+              let preferred_ip_int32 = Ipaddr.V4.to_int32 preferred_ip in
+              let highest_ip_int32 = Ipaddr.V4.to_int32 t.highest_ip in
+              let lowest_ip_int32 = Ipaddr.V4.to_int32 first_ip in
+              if (preferred_ip_int32 > highest_ip_int32)
+              || (preferred_ip_int32 <  lowest_ip_int32)
+              then failwith "Preferred IP address out of range.";
+              if not (List.mem preferred_ip used_ips)
+              then Some preferred_ip
+              else
+                Fmt.kstrf failwith "Preferred IP address %a not available"
+                  Ipaddr.V4.pp_hum preferred_ip
+            ) else None
+          in
 
-            (* check if a specific IP is requested *)
-            let preferred_ip =
-                let uuid_bytes = Uuidm.to_bytes uuid in
-                let uuid_prefix = Bytes.sub uuid_bytes 0 (Bytes.length default_uuid_preferred_ip_prefix) in
-                if (Bytes.compare uuid_prefix default_uuid_preferred_ip_prefix) = 0 then
-                begin
-                    let uuid_suffix = Bytes.sub uuid_bytes 12 4 in
-                    let preferred_ip = Ipaddr.V4.of_bytes_exn uuid_suffix in
-                    Log.info (fun f -> f "Client requested IP %s" (Ipaddr.V4.to_string preferred_ip));
-                    let preferred_ip_int32 = Ipaddr.V4.to_int32 preferred_ip in
-                    let highest_ip_int32 = Ipaddr.V4.to_int32 t.highest_ip in
-                    let lowest_ip_int32 = Ipaddr.V4.to_int32 first_ip in
-                    if (preferred_ip_int32 > highest_ip_int32) || (preferred_ip_int32 <  lowest_ip_int32) then
-                    begin
-                        failwith "Preferred IP address out of range."
-                    end;
-                    if not (List.mem preferred_ip used_ips) then begin
-                        Some preferred_ip
-                    end else begin
-                        failwith (Printf.sprintf "Preferred IP address %s not available" (Ipaddr.V4.to_string preferred_ip))
-                    end
-                end else begin
-                    None
-                end in
+          (* look for a new unique IP *)
+          let rec next_unique_ip next_ip =
+            if (Ipaddr.V4.to_int32 next_ip) > (Ipaddr.V4.to_int32 t.highest_ip)
+            then failwith "No IP addresses available.";
+            if not (List.mem next_ip used_ips) then next_ip
+            else
+              let next_ip =
+                Ipaddr.V4.of_int32 (Int32.succ (Ipaddr.V4.to_int32 next_ip))
+              in
+              next_unique_ip next_ip
+          in
 
-            (* look for a new unique IP *)
-            let rec next_unique_ip next_ip =
-                if (Ipaddr.V4.to_int32 next_ip) > (Ipaddr.V4.to_int32 t.highest_ip) then
-                begin
-                    failwith "No IP addresses available."
-                end;
-                if not (List.mem next_ip used_ips) then begin
-                    next_ip
-                end else begin
-                    let next_ip = Ipaddr.V4.of_int32 (Int32.succ (Ipaddr.V4.to_int32 next_ip)) in
-                    next_unique_ip next_ip
-                end
-            in
+          let client_ip = (match preferred_ip with
+              | None -> next_unique_ip first_ip
+              | Some ip -> ip) in
 
-            let client_ip = (match preferred_ip with
-                | None -> next_unique_ip first_ip
-                | Some ip -> ip) in
+          (* Add IP to global ARP table *)
+          Lwt_mutex.with_lock t.global_arp_table.mutex (fun () ->
+              t.global_arp_table.table <-
+                (client_ip, client_macaddr) :: t.global_arp_table.table;
+              Lwt.return_unit)  >>= fun () ->
 
-            (* Add IP to global ARP table *)
-            Lwt_mutex.with_lock t.global_arp_table.mutex (fun () ->
-                t.global_arp_table.table <- (client_ip, client_macaddr) :: t.global_arp_table.table;
-                Lwt.return_unit)  >>= fun () ->
-
-            (* add to client table and return mac *)
-            Hashtbl.replace t.client_uuids.table uuid (client_ip, l2_client_id);
-            Lwt.return client_macaddr
-        end
-    )
+          (* add to client table and return mac *)
+          Hashtbl.replace t.client_uuids.table uuid (client_ip, l2_client_id);
+          Lwt.return client_macaddr
+        )
+      )
 
   let get_client_ip_id t uuid =
     Lwt_mutex.with_lock t.client_uuids.mutex (fun () ->
@@ -1186,25 +1225,27 @@ module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLIC
 
   let connect t client l2_switch =
     Log.debug (fun f -> f "accepted vmnet connection");
-    begin
-        (* If bridge is in use, create unique IP and update global ARP *)
-        if t.bridge_connections then begin
-            or_failwith_result "vmnet" @@ Vmnet.of_fd ~client_macaddr_of_uuid:(client_macaddr_of_uuid t t.peer_ip l2_switch)
-                ~server_macaddr:t.server_macaddr ~mtu:t.mtu client
-             >>= fun x ->
-            let client_macaddr = Vmnet.get_client_macaddr x in
-            let client_uuid = Vmnet.get_client_uuid x in
-            get_client_ip_id t client_uuid
-            >>= fun (client_ip, l2_client_id) ->
-            connect x l2_switch l2_client_id client_macaddr t.server_macaddr client_ip t.local_ip t.highest_ip t.extra_dns_ip t.mtu t.get_domain_search t.get_domain_name t.global_arp_table t.bridge_connections
-        end else begin
-            (* When bridge is disabled, just use fixed uuid and peer_ip from t *)
-            or_failwith_result "vmnet" @@ Vmnet.of_fd ~client_macaddr_of_uuid:(fun _ -> Lwt.return default_client_macaddr)
-                ~server_macaddr:t.server_macaddr ~mtu:t.mtu client
-            >>= fun x ->
-            let client_macaddr = Vmnet.get_client_macaddr x in
-            connect x l2_switch (-1) client_macaddr t.server_macaddr t.peer_ip t.local_ip t.highest_ip t.extra_dns_ip t.mtu t.get_domain_search t.get_domain_name t.global_arp_table t.bridge_connections
-        end
-    end
+    (* If bridge is in use, create unique IP and update global ARP *)
+    if t.bridge_connections then (
+      Vmnet.of_fd ~client_macaddr_of_uuid:(client_macaddr_of_uuid t t.peer_ip l2_switch)
+        ~server_macaddr:t.server_macaddr ~mtu:t.mtu client
+      >>= fun x ->
+      let client_macaddr = Vmnet.get_client_macaddr x in
+      let client_uuid = Vmnet.get_client_uuid x in
+      get_client_ip_id t client_uuid >>= fun (client_ip, l2_client_id) ->
+      connect x l2_switch l2_client_id client_macaddr t.server_macaddr
+        client_ip t.local_ip t.highest_ip t.extra_dns_ip t.mtu
+        t.get_domain_search t.get_domain_name t.global_arp_table
+        t.bridge_connections
+    ) else (
+      (* When bridge is disabled, just use fixed uuid and peer_ip from t *)
+      Vmnet.of_fd ~client_macaddr_of_uuid:(fun _ -> Lwt.return default_client_macaddr)
+        ~server_macaddr:t.server_macaddr ~mtu:t.mtu client
+      >>= fun x ->
+      let client_macaddr = Vmnet.get_client_macaddr x in
+      connect x l2_switch (-1) client_macaddr t.server_macaddr t.peer_ip
+        t.local_ip t.highest_ip t.extra_dns_ip t.mtu t.get_domain_search
+        t.get_domain_name t.global_arp_table t.bridge_connections
+    )
 
 end

@@ -38,10 +38,8 @@ module Make (Ethif: Mirage_net_lwt.S) = struct
   type buffer = Cstruct.t
   type macaddr = Macaddr.t
   module Table = Map.Make(Ipaddr.V4)
-  type t = {
-    ethif: Ethif.t;
-    mutable table: macaddr Table.t;
-  }
+
+  type t = { ethif: Ethif.t; mutable table: macaddr Table.t }
   type error = Mirage_protocols.Arp.error
   let pp_error = Mirage_protocols.Arp.pp_error
 
@@ -50,35 +48,46 @@ module Make (Ethif: Mirage_net_lwt.S) = struct
   type repr = string
 
   let to_repr t =
-    Lwt.return (String.concat "; " (List.map (fun (ip, mac) -> Printf.sprintf "%s -> %s" (Ipaddr.V4.to_string ip) (Macaddr.to_string mac)) (Table.bindings t.table)))
+    Table.bindings t.table
+    |> List.map (fun (ip, mac) ->
+        Fmt.strf "%s -> %s" (Ipaddr.V4.to_string ip) (Macaddr.to_string mac))
+    |> String.concat "; "
+    |> Lwt.return
+
   let pp fmt repr =
     Format.fprintf fmt "%s" repr
 
   let get_ips t = List.map fst (Table.bindings t.table)
+
   let add_ip t ip =
     let mac = Ethif.mac t.ethif in
-    Log.debug (fun f -> f "ARP: adding %s -> %s" (Ipaddr.V4.to_string ip) (Macaddr.to_string mac));
+    Log.debug (fun f -> f "ARP: adding %s -> %s"
+                  (Ipaddr.V4.to_string ip) (Macaddr.to_string mac));
     Lwt.return_unit
+
   let set_ips t ips = Lwt_list.iter_s (add_ip t) ips
+
   let remove_ip t ip =
     Log.debug (fun f -> f "ARP: removing %s" (Ipaddr.V4.to_string ip));
     t.table <- Table.remove ip t.table;
     Lwt.return_unit
+
   let query t ip =
     if Table.mem ip t.table
     then Lwt.return (Ok (Table.find ip t.table))
-    else begin
-      Log.warn (fun f -> f "ARP table has no entry for %s" (Ipaddr.V4.to_string ip));
+    else (
+      Log.warn (fun f -> f "ARP table has no entry for %s"
+                   (Ipaddr.V4.to_string ip));
       Lwt.return (Error `Timeout)
-    end
+    )
 
   type arp = {
-      op: [ `Request |`Reply |`Unknown of int ];
-      sha: Macaddr.t;
-      spa: Ipaddr.V4.t;
-      tha: Macaddr.t;
-      tpa: Ipaddr.V4.t;
-    }
+    op: [ `Request |`Reply |`Unknown of int ];
+    sha: Macaddr.t;
+    spa: Ipaddr.V4.t;
+    tha: Macaddr.t;
+    tpa: Ipaddr.V4.t;
+  }
 
   let output t arp =
     let open Arpv4_wire in
@@ -142,7 +151,12 @@ module Make (Ethif: Mirage_net_lwt.S) = struct
   type ethif = Ethif.t
 
   let connect ~table ethif =
-    let table = List.fold_left (fun acc (ip, mac) -> Table.add ip mac acc) Table.empty table in
-    Lwt.return (`Ok { table; ethif })
+    let table =
+      List.fold_left
+        (fun acc (ip, mac) -> Table.add ip mac acc)
+        Table.empty table
+    in
+    { table; ethif }
+
   let disconnect _t = Lwt.return_unit
 end

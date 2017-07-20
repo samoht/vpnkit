@@ -1,5 +1,3 @@
-module Lwt_result = Hostnet_lwt_result (* remove when new Lwt is released *)
-
 open Lwt.Infix
 
 let src =
@@ -31,12 +29,14 @@ let sockaddr_of_address (dst, dst_port) =
 module Common = struct
   (** FLOW boilerplate *)
 
-  type error = [
-    | `Msg of string
-  ]
+  type error = [`Msg of string]
+  type write_error = [Mirage_flow.write_error | error]
 
-  let error_message = function
-    | `Msg x -> x
+  let pp_error ppf (`Msg s) = Fmt.string ppf s
+
+  let pp_write_error ppf = function
+    | #Mirage_flow.write_error as e -> Mirage_flow.pp_write_error ppf e
+    | #error as e -> pp_error ppf e
 
   let errorf fmt = Printf.ksprintf (fun s -> Lwt_result.fail (`Msg s)) fmt
 
@@ -152,47 +152,50 @@ module Sockets = struct
           )
 
       let rec read t = match t.fd, t.already_read with
-        | None, _ -> Lwt.return `Eof
+        | None, _ -> Lwt.return (Ok `Eof)
         | Some _, Some data when Cstruct.len data > 0 ->
           t.already_read <- Some (Cstruct.sub data 0 0); (* next read is `Eof *)
-          Lwt.return (`Ok data)
+          Lwt.return (Ok (`Data data))
         | Some _, Some _ ->
-          Lwt.return `Eof
+          Lwt.return (Ok `Eof)
         | Some fd, None ->
           let buf = Cstruct.create t.read_buffer_size in
           Lwt.catch
             (fun () ->
               Uwt.Udp.recv_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len ~buf:buf.Cstruct.buffer fd
               >>= fun recv ->
-              if recv.Uwt.Udp.is_partial then begin
-                Log.err (fun f -> f "Socket.%s.recvfrom: dropping partial response (buffer was %d bytes)" t.label (Cstruct.len buf));
+              if recv.Uwt.Udp.is_partial then (
+                Log.err (fun f -> f "Socket.%s.recvfrom: dropping partial \
+                                     response (buffer was %d bytes)" t.label
+                            (Cstruct.len buf));
                 read t
-              end else Lwt.return (`Ok (Cstruct.sub buf 0 recv.Uwt.Udp.recv_len))
+              ) else
+                Lwt.return (Ok (`Data (Cstruct.sub buf 0 recv.Uwt.Udp.recv_len)))
             ) (function
               | Unix.Unix_error(e, _, _) when Uwt.of_unix_error e = Uwt.ECANCELED ->
                 (* happens on normal timeout *)
-                Lwt.return `Eof
+                Lwt.return (Ok `Eof)
               | e ->
                 Log.err (fun f -> f "Socket.%s.recvfrom: %s caught %s returning Eof"
                   t.label
                   (string_of_flow t)
                   (Printexc.to_string e)
                 );
-                Lwt.return `Eof
+                Lwt.return (Ok `Eof)
             )
 
       let write t buf = match t.fd with
-        | None -> Lwt.return `Eof
+        | None -> Lwt.return (Error `Closed)
         | Some fd ->
           Lwt.catch
             (fun () ->
                Uwt.Udp.send_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len ~buf:buf.Cstruct.buffer fd t.sockaddr
-               >>= fun () ->
-               Lwt.return (`Ok ())
+               >|= fun () ->
+               Ok ()
             ) (fun e ->
                 Log.err (fun f -> f "Socket.%s.write %s: caught %s returning Eof"
                   t.label t.description (Printexc.to_string e));
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
               )
 
       let writev t bufs = write t (Cstruct.concat bufs)
@@ -402,13 +405,14 @@ module Sockets = struct
       let read_into t buf =
         let rec loop buf =
           if Cstruct.len buf = 0
-          then Lwt.return (`Ok ())
+          then Lwt.return (Ok (`Data ()))
           else
             Uwt.Tcp.read_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
             >>= function
-            | 0 -> Lwt.return `Eof
+            | 0 -> Lwt.return (Ok `Eof)
             | n ->
-              loop (Cstruct.shift buf n) in
+              loop (Cstruct.shift buf n)
+        in
         loop buf
 
       let read t =
@@ -417,55 +421,56 @@ module Sockets = struct
           (fun () ->
              Uwt.Tcp.read_ba ~pos:t.read_buffer.Cstruct.off ~len:t.read_buffer.Cstruct.len t.fd ~buf:t.read_buffer.Cstruct.buffer
              >>= function
-             | 0 -> Lwt.return `Eof
+             | 0 -> Lwt.return (Ok `Eof)
              | n ->
                let results = Cstruct.sub t.read_buffer 0 n in
                t.read_buffer <- Cstruct.shift t.read_buffer n;
-               Lwt.return (`Ok results)
+               Lwt.return (Ok (`Data results))
           ) (function
               | Unix.Unix_error(Unix.ECONNRESET, _, _) ->
-                Lwt.return `Eof
+                Lwt.return (Ok `Eof)
               | Unix.Unix_error(e, _, _) when Uwt.of_unix_error e = Uwt.ECANCELED ->
-                Lwt.return `Eof
+                Lwt.return (Ok `Eof)
               | e ->
                 Log.err (fun f -> f "Socket.%s.read %s: caught %s returning Eof" t.label t.description (Printexc.to_string e));
-                Lwt.return `Eof
+                Lwt.return (Ok `Eof)
             )
 
       let write t buf =
         Lwt.catch
           (fun () ->
              Uwt.Tcp.write_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
-             >>= fun () ->
-             Lwt.return (`Ok ())
+             >|= fun () ->
+             Ok ()
           ) (function
               | Unix.Unix_error(Unix.ECONNRESET, _, _) ->
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
               | Unix.Unix_error(e, _, _) when Uwt.of_unix_error e = Uwt.ECANCELED ->
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
               | e ->
                 Log.err (fun f -> f "Socket.%s.write %s: caught %s returning Eof" t.label t.description (Printexc.to_string e));
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
             )
 
       let writev t bufs =
         Lwt.catch
           (fun () ->
              let rec loop = function
-               | [] -> Lwt.return (`Ok ())
+               | [] -> Lwt.return (Ok ())
                | buf :: bufs ->
                  Uwt.Tcp.write_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
                  >>= fun () ->
-                 loop bufs in
+                 loop bufs
+             in
              loop bufs
           ) (function
               | Unix.Unix_error(Unix.ECONNRESET, _, _) ->
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
               | Unix.Unix_error(e, _, _) when Uwt.of_unix_error e = Uwt.ECANCELED ->
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
               | e ->
                 Log.err (fun f -> f "Socket.%s.writev %s: caught %s returning Eof" t.label t.description (Printexc.to_string e));
-                Lwt.return `Eof
+                Lwt.return (Error `Closed)
             )
 
       let close t =
@@ -698,29 +703,31 @@ module Sockets = struct
       let read_into t buf =
         let rec loop buf =
           if Cstruct.len buf = 0
-          then Lwt.return (`Ok ())
+          then Lwt.return (Ok (`Data ()))
           else
             Uwt.Pipe.read_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
             >>= function
-            | 0 -> Lwt.return `Eof
-            | n ->
-              loop (Cstruct.shift buf n) in
+            | 0 -> Lwt.return (Ok `Eof)
+            | n -> loop (Cstruct.shift buf n)
+        in
         loop buf
 
       let read t =
         (if Cstruct.len t.read_buffer = 0 then t.read_buffer <- Cstruct.create t.read_buffer_size);
         Lwt.catch
           (fun () ->
-             Uwt.Pipe.read_ba ~pos:t.read_buffer.Cstruct.off ~len:t.read_buffer.Cstruct.len t.fd ~buf:t.read_buffer.Cstruct.buffer
+             Uwt.Pipe.read_ba ~pos:t.read_buffer.Cstruct.off
+               ~len:t.read_buffer.Cstruct.len t.fd
+               ~buf:t.read_buffer.Cstruct.buffer
              >>= function
-             | 0 -> Lwt.return `Eof
+             | 0 -> Lwt.return (Ok `Eof)
              | n ->
                let results = Cstruct.sub t.read_buffer 0 n in
                t.read_buffer <- Cstruct.shift t.read_buffer n;
-               Lwt.return (`Ok results)
+               Lwt.return (Ok (`Data results))
           ) (fun e ->
               Log.err (fun f -> f "Socket.Pipe.read %s: caught %s returning Eof" t.description (Printexc.to_string e));
-              Lwt.return `Eof
+              Lwt.return (Ok `Eof)
             )
 
       let write t buf =
@@ -728,30 +735,32 @@ module Sockets = struct
           (fun () ->
              Uwt.Pipe.write_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
              >>= fun () ->
-             Lwt.return (`Ok ())
+             Lwt.return (Ok ())
           ) (function
              | Unix.Unix_error(Unix.EPIPE, _, _) ->
                (* other end has closed, this is normal *)
-               Lwt.return `Eof
+               Lwt.return (Error `Closed)
              | e ->
                (* Unexpected error *)
                Log.err (fun f -> f "Socket.Pipe.write %s: caught %s returning Eof" t.description (Printexc.to_string e));
-               Lwt.return `Eof
+               Lwt.return (Error `Closed)
             )
 
       let writev t bufs =
         Lwt.catch
           (fun () ->
              let rec loop = function
-               | [] -> Lwt.return (`Ok ())
+               | [] -> Lwt.return (Ok ())
                | buf :: bufs ->
                  Uwt.Pipe.write_ba ~pos:buf.Cstruct.off ~len:buf.Cstruct.len t.fd ~buf:buf.Cstruct.buffer
                  >>= fun () ->
-                 loop bufs in
+                 loop bufs
+             in
              loop bufs
           ) (fun e ->
-              Log.err (fun f -> f "Socket.Pipe.writev %s: caught %s returning Eof" t.description (Printexc.to_string e));
-              Lwt.return `Eof
+              Log.err (fun f -> f "Socket.Pipe.writev %s: caught %a \
+                                   returning Eof" t.description Fmt.exn e);
+              Lwt.return (Error `Closed)
             )
 
       let close t =
@@ -920,26 +929,7 @@ end
 
 module Time = struct
   type 'a io = 'a Lwt.t
-
-  let sleep secs = Uwt.Timer.sleep (int_of_float (secs *. 1000.))
-end
-
-module Clock = struct
-  type tm =
-  { tm_sec: int;
-    tm_min: int;
-    tm_hour: int;
-    tm_mday: int;
-    tm_mon: int;
-    tm_year: int;
-    tm_wday: int;
-    tm_yday: int;
-    tm_isdst: bool;
-  }
-
-  let time = Unix.gettimeofday
-
-  let gmtime _ = failwith "gmtime unimplemented"
+  let sleep_ns ns = Uwt.Timer.sleep (Duration.to_sec ns)
 end
 
 module Dns = struct

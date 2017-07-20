@@ -1,6 +1,4 @@
-module Lwt_result = Hostnet_lwt_result (* remove when new Lwt is released *)
-
-open Lwt
+open Lwt.Infix
 
 let src =
   let src = Logs.Src.create "9P" ~doc:"/port filesystem" in
@@ -26,7 +24,7 @@ let log_exception_continue description f =
   Lwt.catch
     (fun () -> f ())
     (fun e ->
-       Log.err (fun f -> f "%s: failed with %s" description (Printexc.to_string e));
+       Log.err (fun f -> f "%s: failed with %a" description Fmt.exn e);
        Lwt.return ()
     )
 
@@ -35,14 +33,18 @@ let ports_serviceid = "0B95756A-9985-48AD-9470-78E060895BE7"
 
 let hvsock_addr_of_uri ~default_serviceid uri =
   (* hyperv://vmid/serviceid *)
-  let vmid = match Uri.host uri with None -> Hvsock.Loopback | Some x -> Hvsock.Id x in
+  let vmid = match Uri.host uri with
+    | None   -> Hvsock.Loopback
+    | Some x -> Hvsock.Id x
+  in
   let serviceid =
     let p = Uri.path uri in
     if p = ""
     then default_serviceid
     (* trim leading / *)
-    else if String.length p > 0 then String.sub p 1 (String.length p - 1) else p in
-    { Hvsock.vmid; serviceid }
+    else if String.length p > 0 then String.sub p 1 (String.length p - 1) else p
+  in
+  { Hvsock.vmid; serviceid }
 
 module Main(Host: Sig.HOST) = struct
 
@@ -59,22 +61,26 @@ module Hosts = Hosts.Make(Host.Files)
 
 let file_descr_of_int (x: int) : Unix.file_descr =
   if Sys.os_type <> "Unix"
-  then failwith "Cannot convert from an int to Unix.file_descr on platforms other than Unix";
+  then failwith "Cannot convert from an int to Unix.file_descr on platforms \
+                 other than Unix";
   Obj.magic x
 
 let unix_listen path =
   let startswith prefix x =
     let prefix' = String.length prefix in
     let x' = String.length x in
-    prefix' <= x' && (String.sub x 0 prefix' = prefix) in
-  if startswith "fd:" path then begin
+    prefix' <= x' && (String.sub x 0 prefix' = prefix)
+  in
+  if startswith "fd:" path then (
     let i = String.sub path 3 (String.length path - 3) in
-    (  try Lwt.return (int_of_string i)
-       with _ -> Lwt.fail (Failure (Printf.sprintf "Failed to parse command-line argument [%s]" path))
-    ) >>= fun x ->
+    (try Lwt.return (int_of_string i)
+     with _ ->
+       Fmt.kstrf Lwt.fail_with "Failed to parse command-line argument [%s]" path
+    ) >|= fun x ->
     let fd = file_descr_of_int x in
-    Lwt.return (Host.Sockets.Stream.Unix.of_bound_fd fd)
-  end else Host.Sockets.Stream.Unix.bind path
+    Host.Sockets.Stream.Unix.of_bound_fd fd
+  ) else
+    Host.Sockets.Stream.Unix.bind path
 
 let hvsock_connect_forever url sockaddr callback =
   Log.info (fun f -> f "connecting to %s:%s" (Hvsock.string_of_vmid sockaddr.Hvsock.vmid) sockaddr.Hvsock.serviceid);
@@ -290,11 +296,7 @@ let main_t socket_url port_control_url introspection_url diagnostics_url max_con
 
   let config = match db_path with
     | Some db_path ->
-      let reconnect () =
-        let open Lwt_result.Infix in
-        Host.Sockets.Stream.Unix.connect db_path
-        >>= fun x ->
-        Lwt_result.return x in
+      let reconnect () = Host.Sockets.Stream.Unix.connect db_path in
       Some (Config.create ~reconnect ~branch:db_branch ())
     | None ->
       Log.warn (fun f -> f "no database: using hardcoded network configuration values");

@@ -1,5 +1,3 @@
-module Lwt_result = Hostnet_lwt_result (* remove when we have later lwt *)
-
 open Lwt.Infix
 
 let src =
@@ -37,7 +35,10 @@ module Policy(Files: Sig.FILES) = struct
       ) ips) in
     { servers; search = []; assume_offline_after_drops = None }
 
-  module IntMap = Map.Make(struct type t = int let compare (a: int) (b: int) = Pervasives.compare a b end)
+  module IntMap = Map.Make(struct
+      type t = int
+      let compare (a: int) (b: int) = Pervasives.compare a b
+    end)
 
   let google_dns =
     let ips = [
@@ -58,36 +59,41 @@ module Policy(Files: Sig.FILES) = struct
     t := IntMap.add priority c (!t);
     let after = config () in
     if Config.compare before after <> 0
-    then Log.info (fun f -> f "Add(%d): DNS configuration changed to: %s" priority (Config.to_string after))
+    then
+      Log.info (fun f ->
+          f "Add(%d): DNS configuration changed to: %s"
+            priority (Config.to_string after))
+
   let remove ~priority =
     let before = config () in
     t := IntMap.remove priority !t;
     let after = config () in
     if Config.compare before after <> 0
-    then Log.info (fun f -> f "Remove(%d): DNS configuration changed to: %s" priority (Config.to_string after))
+    then
+      Log.info (fun f ->
+          f "Remove(%d): DNS configuration changed to: %s"
+            priority (Config.to_string after))
 
   (* Watch for the /etc/resolv.file *)
   let resolv_conf = "/etc/resolv.conf"
-  let _ =
-    match Files.watch_file resolv_conf
-      (fun () ->
-        Lwt.async
-          (fun () ->
-            let open Error.Infix in
-            Files.read_file resolv_conf
-            >>= fun txt ->
-            match Dns_forward.Config.Unix.of_resolv_conf txt with
-            | Result.Error (`Msg m) ->
-              Log.err (fun f -> f "Failed to parse %s: %s" resolv_conf m);
-              Lwt_result.return ()
-            | Result.Ok servers ->
-              add ~priority:2 ~config:(`Upstream servers);
-              Lwt_result.return ()
-          )
+  let () =
+    match Files.watch_file resolv_conf (fun () ->
+        let process () =
+          let open Lwt_result.Infix in
+          Files.read_file resolv_conf >>= fun txt ->
+          match Dns_forward.Config.Unix.of_resolv_conf txt with
+          | Error (`Msg m) ->
+            Log.err (fun f -> f "Failed to parse %s: %s" resolv_conf m);
+            Lwt_result.return ()
+          | Ok servers ->
+            add ~priority:2 ~config:(`Upstream servers);
+            Lwt_result.return ()
+        in
+        Lwt.async process
       ) with
-    | Result.Error (`Msg m) ->
+    | Error (`Msg m) ->
       Log.info (fun f -> f "Cannot watch %s: %s" resolv_conf m)
-    | Result.Ok _watch ->
+    | Ok _watch ->
       Log.info (fun f -> f "Will watch %s for changes" resolv_conf)
 
 end
@@ -129,7 +135,16 @@ let try_builtins local_ip host_names question =
     Lwt.return (Some [ { name = q_name; cls = RR_IN; flush = false; ttl = 0l; rdata = A local_ip } ])
   | _ -> Lwt.return_none
 
-module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.SOCKETS)(D: Sig.DNS) (Time: V1_LWT.TIME) (Clock: V1.CLOCK) (Recorder: Sig.RECORDER) = struct
+module Make
+    (Ip : Mirage_protocols_lwt.IPV4)
+    (Udp: Mirage_protocols_lwt.UDPV4)
+    (Tcp: Mirage_protocols_lwt.TCPV4)
+    (Socket: Sig.SOCKETS)
+    (D: Sig.DNS)
+    (Time : Mirage_time_lwt.S)
+    (Clock: Mirage_clock_lwt.MCLOCK)
+    (Recorder: Sig.RECORDER) =
+struct
 
   (* DNS uses slightly different protocols over TCP and UDP. We need both a UDP
      and TCP resolver configured to use the upstream servers. We will map UDP
@@ -175,47 +190,47 @@ module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.
       (* This is from mirage-tcpip-- ideally we would use a simpler packet creation fn *)
       let frame = Io_page.to_cstruct (Io_page.get 1) in
       let smac = "\000\000\000\000\000\000" in
-      Wire_structs.set_ethernet_src smac 0 frame;
-      Wire_structs.set_ethernet_ethertype frame 0x0800;
-      let buf = Cstruct.shift frame Wire_structs.sizeof_ethernet in
-      Wire_structs.Ipv4_wire.set_ipv4_hlen_version buf ((4 lsl 4) + (5));
-      Wire_structs.Ipv4_wire.set_ipv4_tos buf 0;
-      Wire_structs.Ipv4_wire.set_ipv4_ttl buf 38;
-      let proto = Wire_structs.Ipv4_wire.protocol_to_int `UDP in
-      Wire_structs.Ipv4_wire.set_ipv4_proto buf proto;
-      Wire_structs.Ipv4_wire.set_ipv4_src buf (Ipaddr.V4.to_int32 source_ip);
-      Wire_structs.Ipv4_wire.set_ipv4_dst buf (Ipaddr.V4.to_int32 dest_ip);
-      let header_len = Wire_structs.sizeof_ethernet + Wire_structs.Ipv4_wire.sizeof_ipv4 in
+      Ethif_wire.set_ethernet_src smac 0 frame;
+      Ethif_wire.set_ethernet_ethertype frame 0x0800;
+      let buf = Cstruct.shift frame Ethif_wire.sizeof_ethernet in
+      Ipv4_wire.set_ipv4_hlen_version buf ((4 lsl 4) + (5));
+      Ipv4_wire.set_ipv4_tos buf 0;
+      Ipv4_wire.set_ipv4_ttl buf 38;
+      let proto = Ipv4_packet.Marshal.protocol_to_int `UDP in
+      Ipv4_wire.set_ipv4_proto buf proto;
+      Ipv4_wire.set_ipv4_src buf (Ipaddr.V4.to_int32 source_ip);
+      Ipv4_wire.set_ipv4_dst buf (Ipaddr.V4.to_int32 dest_ip);
+      let header_len = Ethif_wire.sizeof_ethernet + Ipv4_wire.sizeof_ipv4 in
 
-      let frame = Cstruct.set_len frame (header_len + Wire_structs.sizeof_udp) in
+      let frame = Cstruct.set_len frame (header_len + Udp_wire.sizeof_udp) in
       let udp_buf = Cstruct.shift frame header_len in
-      Wire_structs.set_udp_source_port udp_buf source_port;
-      Wire_structs.set_udp_dest_port udp_buf dest_port;
-      Wire_structs.set_udp_length udp_buf (Wire_structs.sizeof_udp + Cstruct.lenv bufs);
-      Wire_structs.set_udp_checksum udp_buf 0;
+      Udp_wire.set_udp_source_port udp_buf source_port;
+      Udp_wire.set_udp_dest_port udp_buf dest_port;
+      Udp_wire.set_udp_length udp_buf (Udp_wire.sizeof_udp + Cstruct.lenv bufs);
+      Udp_wire.set_udp_checksum udp_buf 0;
       let csum = Ip.checksum frame (udp_buf :: bufs) in
-      Wire_structs.set_udp_checksum udp_buf csum;
+      Udp_wire.set_udp_checksum udp_buf csum;
       (* Ip.writev *)
       let bufs = frame :: bufs in
-      let tlen = Cstruct.lenv bufs - Wire_structs.sizeof_ethernet in
+      let tlen = Cstruct.lenv bufs - Ethif_wire.sizeof_ethernet in
       let dmac = String.make 6 '\000' in
       (* Ip.adjust_output_header *)
-      Wire_structs.set_ethernet_dst dmac 0 frame;
-      let buf = Cstruct.sub frame Wire_structs.sizeof_ethernet Wire_structs.Ipv4_wire.sizeof_ipv4 in
+      Ethif_wire.set_ethernet_dst dmac 0 frame;
+      let buf = Cstruct.sub frame Ethif_wire.sizeof_ethernet Ipv4_wire.sizeof_ipv4 in
       (* Set the mutable values in the ipv4 header *)
-      Wire_structs.Ipv4_wire.set_ipv4_len buf tlen;
-      Wire_structs.Ipv4_wire.set_ipv4_id buf (Random.int 65535); (* TODO *)
-      Wire_structs.Ipv4_wire.set_ipv4_csum buf 0;
+      Ipv4_wire.set_ipv4_len buf tlen;
+      Ipv4_wire.set_ipv4_id buf (Random.int 65535); (* TODO *)
+      Ipv4_wire.set_ipv4_csum buf 0;
       let checksum = Tcpip_checksum.ones_complement buf in
-      Wire_structs.Ipv4_wire.set_ipv4_csum buf checksum;
+      Ipv4_wire.set_ipv4_csum buf checksum;
       Recorder.record recorder bufs
     | None ->
       () (* nowhere to log packet *)
 
-  let create ~local_address ~host_names =
+  let create ~local_address ~host_names config clock =
     let local_ip = local_address.Dns_forward.Config.Address.ip in
     Log.info (fun f -> f "DNS names %s will map to local IP %s" (String.concat ", " @@ List.map Dns.Name.to_string host_names) (Ipaddr.to_string local_ip));
-    function
+    match config with
     | `Upstream config ->
       let open Dns_forward.Config.Address in
       let nr_servers =
@@ -231,9 +246,9 @@ module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.
         | _ ->
           (* We don't know how to marshal IPv6 yet *)
           Lwt.return_unit in
-      Dns_udp_resolver.create ~message_cb config
+      Dns_udp_resolver.create ~message_cb config clock
       >>= fun dns_udp_resolver ->
-      Dns_tcp_resolver.create ~message_cb config
+      Dns_tcp_resolver.create ~message_cb config clock
       >>= fun dns_tcp_resolver ->
       Lwt.return { local_ip; host_names; resolver = Upstream { dns_tcp_resolver; dns_udp_resolver } }
     | `Host ->
@@ -243,15 +258,11 @@ module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.
   let answer t is_tcp buffer =
     let open Dns.Packet in
     let len = Cstruct.len buffer in
-    let buf = Dns.Buf.of_cstruct buffer in
-    match Dns.Protocol.Server.parse (Dns.Buf.sub buf 0 len) with
+    let buf = buffer in
+    match Dns.Protocol.Server.parse (Cstruct.sub buf 0 len) with
     | None ->
-      Lwt.return (Result.Error (`Msg "failed to parse DNS packet"))
+      Lwt.return (Error (`Msg "failed to parse DNS packet"))
     | Some ({ questions = [ question ]; _ } as request) ->
-      let marshal pkt =
-        let buf = Dns.Buf.create 1024 in
-        let buf = Dns.Packet.marshal buf pkt in
-        Cstruct.of_bigarray buf in
       let reply answers =
         let id = request.id in
         let detail = { request.detail with Dns.Packet.qr = Dns.Packet.Response; ra = true } in
@@ -261,12 +272,12 @@ module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.
       begin try_etc_hosts question
       >>= function
       | Some answers ->
-        Lwt.return (Result.Ok (marshal @@ reply answers))
+        Lwt.return (Ok (marshal @@ reply answers))
       | None ->
         try_builtins t.local_ip t.host_names question
         >>= function
         | Some answers ->
-          Lwt.return (Result.Ok (marshal @@ reply answers))
+          Lwt.return (Ok (marshal @@ reply answers))
         | None ->
           begin match is_tcp, t.resolver with
           | true, Upstream { dns_tcp_resolver; _ } ->
@@ -283,63 +294,60 @@ module Make(Ip: V1_LWT.IPV4) (Udp:V1_LWT.UDPV4) (Tcp:V1_LWT.TCPV4) (Socket: Sig.
                 let questions = request.questions in
                 let authorities = [] and additionals = [] and answers = [] in
                 { Dns.Packet.id; detail; questions; answers; authorities; additionals } in
-              Lwt.return (Result.Ok (marshal nxdomain))
+              Lwt.return (Ok (marshal nxdomain))
             | answers ->
-              Lwt.return (Result.Ok (marshal @@ reply answers))
+              Lwt.return (Ok (marshal @@ reply answers))
           end
       end
     | _ ->
-      Lwt.return (Result.Error (`Msg "DNS packet had multiple questions"))
+      Lwt.return (Error (`Msg "DNS packet had multiple questions"))
 
   let describe buf =
     let len = Cstruct.len buf in
-    let buf = Dns.Buf.of_cstruct buf in
-    match Dns.Protocol.Server.parse (Dns.Buf.sub buf 0 len) with
+    match Dns.Protocol.Server.parse (Cstruct.sub buf 0 len) with
     | None -> Printf.sprintf "Unparsable DNS packet length %d" len
     | Some request -> Dns.Packet.to_string request
 
   let handle_udp ~t ~udp ~src ~dst:_ ~src_port buf =
-    answer t false buf
-    >>= function
-    | Result.Error (`Msg m) ->
+    answer t false buf >>= function
+    | Error (`Msg m) ->
       Log.warn (fun f -> f "%s lookup failed: %s" (describe buf) m);
-      Lwt.return_unit
-    | Result.Ok buffer ->
-      Udp.write ~source_port:53 ~dest_ip:src ~dest_port:src_port udp buffer
+      Lwt.return (Ok ())
+    | Ok buffer ->
+      Udp.write ~src_port:53 ~dst:src ~dst_port:src_port udp buffer
 
   let handle_tcp ~t =
     (* FIXME: need to record the upstream request *)
     let listeners _ =
       Log.debug (fun f -> f "DNS TCP handshake complete");
-      Some (fun flow ->
+      let f flow =
         let packets = Dns_tcp_framing.connect flow in
         let rec loop () =
-          Dns_tcp_framing.read packets
-          >>= function
-          | Result.Error _ ->
-            Lwt.return_unit
-          | Result.Ok request ->
+          Dns_tcp_framing.read packets >>= function
+          | Error _    -> Lwt.return_unit
+          | Ok request ->
             (* Perform queries in background threads *)
-            Lwt.async
-              (fun () ->
-                answer t true request
-                >>= function
-                | Result.Error (`Msg m) ->
-                  Log.warn (fun f -> f "%s lookup failed: %s" (describe request) m);
+            let process () =
+              answer t true request >>= function
+              | Error (`Msg m) ->
+                Log.warn
+                  (fun f -> f "%s lookup failed: %s" (describe request) m);
+                Lwt.return_unit
+              | Ok buffer ->
+                Dns_tcp_framing.write packets buffer >>= function
+                | Error (`Msg m) ->
+                  Log.warn (fun f -> f "%s failed to write response: %s"
+                               (describe buffer) m);
                   Lwt.return_unit
-                | Result.Ok buffer ->
-                  begin Dns_tcp_framing.write packets buffer
-                  >>= function
-                  | Result.Error (`Msg m) ->
-                    Log.warn (fun f -> f "%s failed to write response: %s" (describe buffer) m);
-                    Lwt.return_unit
-                  | Result.Ok () ->
-                    Lwt.return_unit
-                  end
-              );
-              loop () in
+                | Ok () -> Lwt.return_unit
+            in
+            Lwt.async process;
+            loop ()
+        in
         loop ()
-      ) in
+      in
+      Some f
+    in
     Lwt.return listeners
 
 end
