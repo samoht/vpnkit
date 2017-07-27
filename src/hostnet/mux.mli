@@ -21,7 +21,7 @@ module Make(Netif: V1_LWT.NETWORK) : sig
   type rule = Ipaddr.V4.t
   (** We currently support matching on IPv4 destination addresses only *)
 
-  module Port : V1_LWT.NETWORK
+  module Port : Mirage_net_lwt.S
   (** A network which receives all the traffic matching a specific rule *)
 
   val port: t -> rule -> Port.t

@@ -19,7 +19,7 @@ module type FLOW_CLIENT = sig
 end
 
 module type CONN = sig
-  include V1_LWT.FLOW
+  include Mirage_flow_lwt.S
 
   include READ_INTO
     with type flow := flow
