@@ -54,8 +54,8 @@ module Main(Host: Sig.HOST) = struct
   module Bind = Bind.Make(Host.Sockets)
   module Dns_policy = Hostnet_dns.Policy(Host.Files)
   module Config = Active_config.Make(Host.Time)(Host.Sockets.Stream.Unix)
-  module Forward_unix = Forward.Make(Connect_unix)(Bind)
-  module Forward_hvsock = Forward.Make(Connect_hvsock)(Bind)
+  module Forward_unix = Forward.Make(Mclock)(Connect_unix)(Bind)
+  module Forward_hvsock = Forward.Make(Mclock)(Connect_hvsock)(Bind)
   module HV = Flow_lwt_hvsock.Make(Host.Time)(Host.Fn)
   module Hosts = Hosts.Make(Host.Files)
 
@@ -98,10 +98,10 @@ module Main(Host: Sig.HOST) = struct
           (* no need to add more delay *)
         | Unix.Unix_error(_, _, _) ->
           HV.Hvsock.close socket >>= fun () ->
-          Host.Time.sleep 1.
+          Host.Time.sleep_ns (Duration.of_sec 1)
         | _ ->
           HV.Hvsock.close socket >>= fun () ->
-          Host.Time.sleep 1.
+          Host.Time.sleep_ns (Duration.of_sec 1)
         )
       >>= fun () ->
       aux ()
@@ -161,10 +161,11 @@ module Main(Host: Sig.HOST) = struct
              database key slirp/max-connections instead"));
     Host.Sockets.set_max_connections max_connections;
     let uri = Uri.of_string port_control_url in
+    Mclock.connect () >>= fun clock ->
     match Uri.scheme uri with
     | Some "hyperv-connect" ->
       let module Ports = Active_list.Make(Forward_hvsock) in
-      let fs = Ports.make () in
+      let fs = Ports.make clock in
       Ports.set_context fs "";
       let module Server = Protocol_9p.Server.Make(Log9P)(HV)(Ports) in
       let sockaddr = hvsock_addr_of_uri ~default_serviceid:ports_serviceid uri in
@@ -178,7 +179,7 @@ module Main(Host: Sig.HOST) = struct
           | Ok server -> Server.after_disconnect server)
     | _ ->
       let module Ports = Active_list.Make(Forward_unix) in
-      let fs = Ports.make () in
+      let fs = Ports.make clock in
       Ports.set_context fs vsock_path;
       let module Server =
         Protocol_9p.Server.Make(Log9P)(Host.Sockets.Stream.Unix)(Ports)

@@ -1,5 +1,5 @@
-module Make(Netif: V1_LWT.NETWORK) : sig
-  include V1_LWT.NETWORK
+module Make(Netif: Mirage_net_lwt.S) : sig
+  include Mirage_net_lwt.S
 
   (** A simple ethernet multiplexer/demultiplexer
 
@@ -14,7 +14,7 @@ module Make(Netif: V1_LWT.NETWORK) : sig
 
   *)
 
-  val connect: Netif.t -> t Lwt.t
+  val connect: Netif.t -> (t, error) result Lwt.t
   (** Connect a multiplexer/demultiplexer and return a [t] which behaves like
       a V1_LWT.NETWORK representing the multiplexed end. *)
 
