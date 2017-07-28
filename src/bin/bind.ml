@@ -8,15 +8,11 @@ module Log = (val Logs.src_log src : Logs.LOG)
 open Lwt.Infix
 open Vmnet
 
-let errorf fmt = Fmt.kstrf (fun e -> Lwt.return (`Error (`Msg e))) fmt
-let error_of_failure f =
-  Lwt.catch f (fun e -> Lwt_result.fail (`Msg (Printexc.to_string e)))
-
 let is_windows = Sys.os_type = "Win32"
 
 module Make(Socket: Sig.SOCKETS) = struct
 
-  module Channel = Channel.Make(Socket.Stream.Unix)
+  module Channel = Mirage_channel_lwt.Make(Socket.Stream.Unix)
 
   type t = {
     fd: Socket.Stream.Unix.flow;
@@ -33,17 +29,19 @@ module Make(Socket: Sig.SOCKETS) = struct
   let of_fd fd =
     let buf = Cstruct.create Init.sizeof in
     let (_: Cstruct.t) = Init.marshal Init.default buf in
-    error_of_failure (fun () ->
-        let c = Channel.create fd in
-        Channel.write_buffer c buf;
-        Channel.flush c >>= fun () ->
-        Channel.read_exactly ~len:Init.sizeof c >>= fun bufs ->
-        let buf = Cstruct.concat bufs in
-        let open Lwt_result.Infix in
-        Lwt.return (Init.unmarshal buf)
-        >>= fun (init, _) ->
+    let c = Channel.create fd in
+    let open Lwt_result.Infix in
+    Channel.write_buffer c buf;
+    Channel.flush c >>= fun () ->
+    Channel.read_exactly ~len:Init.sizeof c >>= function
+    | `Eof       -> Lwt_result.fail `Eof
+    | `Data bufs ->
+      let buf = Cstruct.concat bufs in
+      let open Lwt_result.Infix in
+      Lwt.return (Init.unmarshal buf)
+      >>= fun (init, _) ->
         Log.info (fun f ->
-            f "Client.negotiate: received %s" (Init.to_string init));
+          f "Client.negotiate: received %s" (Init.to_string init));
         Lwt_result.return { fd; c }
       )
 

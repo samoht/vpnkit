@@ -277,6 +277,8 @@ module Main(Host: Sig.HOST) = struct
       List.map Dns.Name.of_string @@ Astring.String.cuts ~sep:"," host_names
     in
 
+    Mclock.connect () >>= fun clock ->
+
     let hardcoded_configuration =
       let server_macaddr = Slirp.default_server_macaddr in
       let peer_ip = Ipaddr.V4.of_string_exn "192.168.65.2" in
@@ -302,7 +304,8 @@ module Main(Host: Sig.HOST) = struct
         client_uuids;
         bridge_connections = true;
         mtu = 1500;
-        host_names }
+        host_names;
+        clock }
     in
 
     let config = match db_path with
@@ -326,14 +329,15 @@ module Main(Host: Sig.HOST) = struct
     match Uri.scheme uri with
     | Some "hyperv-connect" ->
       let module Slirp_stack =
-        Slirp.Make(Config)(Vmnet.Make(HV))(Dns_policy)(Host)(Vnet)
+        Slirp.Make(Config)(Vmnet.Make(HV))(Dns_policy)
+          (Mclock)(Stdlibrandom)(Host)(Vnet)
       in
       let sockaddr =
         hvsock_addr_of_uri ~default_serviceid:ethernet_serviceid
           (Uri.of_string socket_url)
       in
       ( match config with
-      | Some config -> Slirp_stack.create ~host_names config
+      | Some config -> Slirp_stack.create ~host_names clock config
       | None -> Lwt.return hardcoded_configuration
       ) >>= fun stack_config ->
       hvsock_connect_forever socket_url sockaddr (fun fd ->
@@ -348,11 +352,11 @@ module Main(Host: Sig.HOST) = struct
     | _ ->
       let module Slirp_stack =
         Slirp.Make(Config)(Vmnet.Make(Host.Sockets.Stream.Unix))(Dns_policy)
-          (Host)(Vnet)
+          (Mclock)(Stdlibrandom)(Host)(Vnet)
       in
       unix_listen socket_url >>= fun server ->
       ( match config with
-      | Some config -> Slirp_stack.create ~host_names config
+      | Some config -> Slirp_stack.create ~host_names clock config
       | None -> Lwt.return hardcoded_configuration
       ) >>= fun stack_config ->
       Host.Sockets.Stream.Unix.listen server (fun conn ->
