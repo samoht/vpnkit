@@ -38,9 +38,9 @@ module Port = struct
     | `Udp of Ipaddr.t * Int16.t
   ]
 
-  let to_string = function
-  | `Tcp (addr, port) -> Fmt.strf "tcp:%a:%d" Ipaddr.pp_hum addr port
-  | `Udp (addr, port) -> Fmt.strf "udp:%a:%d" Ipaddr.pp_hum addr port
+  let pp ppf = function
+  | `Tcp (addr, port) -> Fmt.pf ppf "tcp:%a:%d" Ipaddr.pp_hum addr port
+  | `Udp (addr, port) -> Fmt.pf ppf "udp:%a:%d" Ipaddr.pp_hum addr port
 
   let of_string x =
     try
@@ -82,8 +82,7 @@ struct
   type clock = Clock.t
   type context = string
 
-  let to_string t =
-    Fmt.strf "%s:%s" (Port.to_string t.local) (Port.to_string t.remote_port)
+  let pp ppf t = Fmt.pf ppf "%a:%a" Port.pp t.local Port.pp t.remote_port
 
   let description_of_format =
     "'<tcp|udp>:local ip:local port:remote vchan port'"
@@ -291,15 +290,14 @@ struct
         | false -> Lwt.return ()
       in
       Log.debug (fun f ->
-          f "%s: connecting to vsock port %s" description
-            (Port.to_string remote_port));
+          f "%s: connecting to vsock port %a" description Port.pp remote_port);
       Connector.connect () >>= fun v ->
       Lwt.finalize (fun () ->
           write_forwarding_header description v remote_port
           >>= fun () ->
           Log.debug (fun f ->
-              f "%s: connected to vsock port %s" description
-                (Port.to_string remote_port));
+              f "%s: connected to vsock port %a" description
+                Port.pp remote_port);
           (* FIXME(samoht): why ignoring that thread here? *)
           let _ = from_vsock v in
           from_internet v
@@ -327,7 +325,8 @@ struct
               `Tcp (local_ip, port)
             | _ ->
               t.local );
-          start_tcp_proxy state (to_string t) vsock_path_var t.remote_port server
+          let descr = Fmt.to_to_string pp t in
+          start_tcp_proxy state descr vsock_path_var t.remote_port server
           >|= fun () ->
           Ok t
         ) (function
@@ -353,7 +352,8 @@ struct
           Socket.Datagram.Udp.bind ~description (local_ip, local_port)
           >>= fun server ->
           t.server <- Some (`Udp server);
-          start_udp_proxy (to_string t) vsock_path_var t.remote_port server
+          let descr = Fmt.to_to_string pp t in
+          start_udp_proxy descr vsock_path_var t.remote_port server
           >|= fun () ->
           Ok t
         ) (function
@@ -372,7 +372,7 @@ struct
         )
 
   let stop t =
-    Log.debug (fun f -> f "%s: closing listening socket" (to_string t));
+    Log.debug (fun f -> f "%a: closing listening socket" pp t);
     match t.server with
     | Some (`Tcp s) -> Socket.Stream.Tcp.shutdown s
     | Some (`Udp s) -> Socket.Datagram.Udp.shutdown s

@@ -34,7 +34,7 @@ end
 module type Instance = sig
   type t
   type clock
-  val to_string: t -> string
+  val pp: t Fmt.t
   val of_string: string -> (t, [ `Msg of string ]) result
 
   val description_of_format: string
@@ -277,8 +277,7 @@ The directory will be deleted and replaced with a file of the same name.
         let data = Cstruct.sub readme offset len in
         return { Response.Read.data }
       | Entry { instance = Some i; _ } ->
-        let i' = Instance.to_string i in
-        read_string count offset (i' ^ "\n")
+        read_string count offset (Fmt.strf "%a\n" Instance.pp i)
       | Entry { instance = None; _ } ->
         let children =
           dot
@@ -349,12 +348,11 @@ The directory will be deleted and replaced with a file of the same name.
             function
             | Ok f' -> (* local_port is resolved *)
               entry.instance <- Some f';
-              entry.result <- Some ("OK " ^ (Instance.to_string f') ^ "\n");
-              Log.debug (fun f ->
-                  f "Created instance %s" (Instance.to_string f'));
+              entry.result <- Some (Fmt.strf "OK %a\n" Instance.pp f');
+              Log.debug (fun f -> f "Created instance %a" Instance.pp f');
               return ok
             | Error (`Msg m) ->
-              entry.result <- Some ("ERROR " ^ m ^ "\n");
+              entry.result <- Some (Fmt.strf "ERROR %s\n" m);
               return ok
           end
         | Error (`Msg m) ->
