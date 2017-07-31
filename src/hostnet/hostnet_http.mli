@@ -3,7 +3,7 @@ module Exclude: sig
   (** A request destination which should bypass the proxy *)
 
   val of_string: string -> t
-  val to_string: t -> string
+  val pp: t Fmt.t
 
   val matches: Ipaddr.V4.t -> Cohttp.Request.t option -> t -> bool
   (** If true, the given request should bypass the proxy *)
@@ -20,7 +20,7 @@ sig
   type t
   (** An HTTP proxy instance with a fixed configuration *)
 
-  val to_string: t -> string
+  val pp: t Fmt.t
 
   val create: ?http:string -> ?https:string -> ?exclude:string -> unit ->
     (t, [`Msg of string]) result Lwt.t

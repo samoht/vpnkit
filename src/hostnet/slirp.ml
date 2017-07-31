@@ -1331,8 +1331,7 @@ module Filteredif = Filter.Make(Vmnet)
       ( match !http with
       | None -> Log.info (fun f -> f "Disabling transparent HTTP redirection")
       | Some x -> Log.info (fun f ->
-          f "Enabling transparent HTTP redirection to %s"
-            (Http_forwarder.to_string x)) );
+          f "Enabling transparent HTTP redirection to %a" Http_forwarder.pp x));
       Active_config.tl settings
       >>= fun settings ->
       monitor_http_intercept_settings settings

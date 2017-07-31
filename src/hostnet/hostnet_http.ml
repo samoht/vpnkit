@@ -21,9 +21,9 @@ module Exclude = struct
       | "*" -> Any
       | x -> String x
 
-      let to_string = function
-      | Any -> "*"
-      | String x -> x
+      let pp ppf = function
+      | Any -> Fmt.string ppf "*"
+      | String x -> Fmt.string ppf x
 
       let matches x = function
       | Any -> true
@@ -41,10 +41,10 @@ module Exclude = struct
         Subdomain (List.map Element.of_string bits)
       | Some prefix -> CIDR prefix
 
-    let to_string = function
+    let pp ppf = function
+    | CIDR prefix -> Fmt.pf ppf "CIDR %a" Ipaddr.V4.Prefix.pp_hum prefix
     | Subdomain x ->
-      "Subdomain " ^ String.concat ~sep:"." @@ List.map Element.to_string x
-    | CIDR prefix -> "CIDR " ^ Ipaddr.V4.Prefix.to_string prefix
+      Fmt.pf ppf "Subdomain %a" Fmt.(list ~sep:(unit ".") Element.pp) x
 
     let matches dst req = function
     | CIDR prefix -> Ipaddr.V4.Prefix.mem dst prefix
@@ -80,7 +80,7 @@ module Exclude = struct
     in
     List.map One.of_string parts
 
-  let to_string t = String.concat ~sep:" " @@ (List.map One.to_string t)
+  let pp = Fmt.(list ~sep:(unit " ") One.pp)
 
   let matches dst req t =
     List.fold_left (||) false (List.map (One.matches dst req) t)
@@ -153,7 +153,9 @@ module Make
     | None   -> []
     | Some x -> [ "https", string @@ string_of_address x ]
     in
-    let exclude = [ "exclude", string @@ Exclude.to_string t.exclude ] in
+    let exclude =
+      [ "exclude", string @@ Fmt.to_to_string Exclude.pp t.exclude ]
+    in
     dict (http @ https @ exclude)
 
   let of_json j =
@@ -181,7 +183,7 @@ module Make
     >>= fun https ->
     Lwt.return (Ok { http; https; exclude })
 
-  let to_string t = Ezjsonm.to_string ~minify:false @@ to_json t
+  let pp ppf t = Fmt.string ppf @@ Ezjsonm.to_string ~minify:false @@ to_json t
 
   let create ?http ?https ?exclude:_ () =
     let open Lwt_result.Infix in
@@ -196,7 +198,7 @@ module Make
     (* FIXME: parse excludes *)
     let exclude = [] in
     let t = { http; https; exclude } in
-    Log.info (fun f -> f "HTTP proxy settings changed to: %s" (to_string t));
+    Log.info (fun f -> f "HTTP proxy settings changed to: %a" pp t);
     Lwt.return (Ok t)
 
   module Incoming = struct
