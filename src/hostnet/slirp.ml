@@ -47,12 +47,11 @@ let or_failwith name m =
   | Error _ -> failf "Failed to connect %s device" name
   | Ok x  -> Lwt.return x
 
-let restart_on_change name to_string values =
+let restart_on_change name pp values =
   Active_config.tl values
   >>= fun values ->
   let v = Active_config.hd values in
-  Log.info (fun f ->
-      f "%s changed to %s in the database: restarting" name (to_string v));
+  Log.info (fun f -> f "%s changed to %a in the database: restarting" name pp v);
   exit 1
 
 type pcap = (string * int64 option) option
@@ -194,8 +193,8 @@ module Filteredif = Filter.Make(Vmnet)
         mutable last_active_time: float;
       }
 
-      let to_string t =
-        Printf.sprintf "%s socket = %s last_active_time = %.1f"
+      let pp ppf t =
+        Fmt.pf ppf "%s socket = %s last_active_time = %.1f"
           (string_of_id t.id)
           (match t.socket with None -> "closed" | _ -> "open")
           (Unix.gettimeofday ())
@@ -204,7 +203,9 @@ module Filteredif = Filter.Make(Vmnet)
       let all : t Id.Map.t ref = ref Id.Map.empty
 
       let filesystem () =
-        let flows = Id.Map.fold (fun _ t acc -> to_string t :: acc) !all [] in
+        let flows =
+          Id.Map.fold (fun _ t acc -> Fmt.to_to_string pp t :: acc) !all []
+        in
         Vfs.File.ro_of_string (String.concat "\n" flows)
 
       let create id socket =
@@ -323,8 +324,7 @@ module Filteredif = Filter.Make(Vmnet)
                 match tcp.Tcp.Flow.socket with
                 | None ->
                   Log.err (fun f ->
-                      f "%s callback called on closed socket"
-                        (Tcp.Flow.to_string tcp));
+                      f "%a callback called on closed socket" Tcp.Flow.pp tcp);
                   Lwt.return_unit
                 | Some socket ->
                   Lwt.finalize (fun () ->
@@ -332,8 +332,8 @@ module Filteredif = Filter.Make(Vmnet)
                       >>= function
                       | Error e ->
                         Log.debug (fun f ->
-                            f "%s proxy failed with %a"
-                              (Tcp.Flow.to_string tcp) Proxy.pp_error e);
+                            f "%a proxy failed with %a" Tcp.Flow.pp tcp
+                              Proxy.pp_error e);
                         Lwt.return_unit
                       | Ok (_l_stats, _r_stats) ->
                         Lwt.return_unit
@@ -1197,7 +1197,7 @@ module Filteredif = Filter.Make(Vmnet)
       string_peer_ips
     >>= fun peer_ips ->
     Lwt.async (fun () ->
-        restart_on_change "slirp/docker" Ipaddr.V4.to_string peer_ips);
+        restart_on_change "slirp/docker" Ipaddr.V4.pp_hum peer_ips);
 
     let host_ips_path = driver @ [ "slirp"; "host" ] in
     Config.string config ~default:default_host host_ips_path
@@ -1206,7 +1206,7 @@ module Filteredif = Filter.Make(Vmnet)
       string_host_ips
     >>= fun host_ips ->
     Lwt.async (fun () ->
-        restart_on_change "slirp/host" Ipaddr.V4.to_string host_ips);
+        restart_on_change "slirp/host" Ipaddr.V4.pp_hum host_ips);
 
     let highest_ips_path = driver @ [ "slirp"; "highest-ip" ] in
     Config.string config ~default:"" highest_ips_path
@@ -1214,7 +1214,7 @@ module Filteredif = Filter.Make(Vmnet)
     Active_config.map (parse_ipv4 default_highest_ip) string_highest_ips
     >>= fun highest_ips ->
     Lwt.async (fun () ->
-        restart_on_change "slirp/highest-ips" Ipaddr.V4.to_string highest_ips);
+        restart_on_change "slirp/highest-ips" Ipaddr.V4.pp_hum highest_ips);
 
     let extra_dns_ips_path = driver @ [ "slirp"; "extra_dns" ] in
     Config.string config ~default:(String.concat "," default_dns_extra)
@@ -1225,8 +1225,8 @@ module Filteredif = Filter.Make(Vmnet)
       string_extra_dns_ips
     >>= fun extra_dns_ips ->
     Lwt.async (fun () ->
-        restart_on_change "slirp/extra_dns" (fun x ->
-            String.concat "," (List.map Ipaddr.V4.to_string x)) extra_dns_ips);
+        restart_on_change "slirp/extra_dns"
+          Fmt.(list ~sep:(unit ",") Ipaddr.V4.pp_hum) extra_dns_ips);
 
     let peer_ip = Active_config.hd peer_ips in
     let local_ip = Active_config.hd host_ips in
@@ -1295,14 +1295,14 @@ module Filteredif = Filter.Make(Vmnet)
     let mtu_path = driver @ [ "slirp"; "mtu" ] in
     Config.int config ~default:default_mtu mtu_path
     >>= fun mtus ->
-    Lwt.async (fun () -> restart_on_change "slirp/mtu" string_of_int mtus);
+    Lwt.async (fun () -> restart_on_change "slirp/mtu" Fmt.int mtus);
     let mtu = Active_config.hd mtus in
 
     let bridge_connections_path = driver @ [ "slirp"; "bridge-connections" ] in
     Config.int config ~default:1 bridge_connections_path
     >>= fun bridge_conn ->
     Lwt.async (fun () ->
-        restart_on_change "slirp/bridge-connections" string_of_int bridge_conn);
+        restart_on_change "slirp/bridge-connections" Fmt.int bridge_conn);
     let bridge_connections = ((Active_config.hd bridge_conn) != 0) in
 
     let http_intercept_path = driver @ [ "slirp"; "http-intercept" ] in
