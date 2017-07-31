@@ -13,9 +13,10 @@ module Config = struct
     | `Host
   ]
 
-  let to_string = function
-  | `Upstream x -> "use upstream DNS servers " ^ (Dns_forward.Config.to_string x)
-  | `Host -> "use host resolver"
+  let pp ppf = function
+  | `Upstream x ->
+    Fmt.pf ppf "use upstream DNS servers %s" (Dns_forward.Config.to_string x)
+  | `Host -> Fmt.string ppf "use host resolver"
 
   let compare a b = match a, b with
   | `Upstream x, `Upstream y -> Dns_forward.Config.compare x y
@@ -61,8 +62,7 @@ module Policy(Files: Sig.FILES) = struct
     let after = config () in
     if Config.compare before after <> 0
     then Log.info (fun f ->
-        f "Add(%d): DNS configuration changed to: %s" priority
-          (Config.to_string after))
+        f "Add(%d): DNS configuration changed to: %a" priority Config.pp after)
 
   let remove ~priority =
     let before = config () in
@@ -71,8 +71,8 @@ module Policy(Files: Sig.FILES) = struct
     if Config.compare before after <> 0
     then
       Log.info (fun f ->
-          f "Remove(%d): DNS configuration changed to: %s" priority
-            (Config.to_string after))
+          f "Remove(%d): DNS configuration changed to: %a" priority
+            Config.pp after)
 
   (* Watch for the /etc/resolv.file *)
   let resolv_conf = "/etc/resolv.conf"

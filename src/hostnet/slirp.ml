@@ -1244,7 +1244,7 @@ module Filteredif = Filter.Make(Vmnet)
       | `Host, _ -> `Host
       in
       Log.info (fun f ->
-          f "updating resolvers to %s" (Hostnet_dns.Config.to_string config));
+          f "updating resolvers to %a" Hostnet_dns.Config.pp config);
       (match !dns with
       | None   -> Lwt.return_unit
       | Some t ->  Dns_forwarder.destroy t)

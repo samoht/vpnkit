@@ -6,7 +6,7 @@ module Config: sig
     | `Upstream of Dns_forward.Config.t (** use upstream servers *)
     | `Host (** use the host's resolver *)
   ]
-  val to_string: t -> string
+  val pp: t Fmt.t
   val compare: t -> t -> int
 end
 

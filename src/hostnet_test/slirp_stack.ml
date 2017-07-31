@@ -48,8 +48,7 @@ module Dns_policy = struct
     let after = config () in
     if Config.compare before after <> 0
     then Log.info (fun f ->
-        f "Add(%d): DNS configuration changed to: %s" priority
-          (Config.to_string after))
+        f "Add(%d): DNS configuration changed to: %a" priority Config.pp after)
 
   let remove ~priority =
     let before = config () in
@@ -57,8 +56,8 @@ module Dns_policy = struct
     let after = config () in
     if Config.compare before after <> 0
     then Log.info (fun f ->
-        f "Remove(%d): DNS configuration changed to: %s" priority
-          (Config.to_string after))
+        f "Remove(%d): DNS configuration changed to: %a" priority
+          Config.pp after)
 
 end
 
