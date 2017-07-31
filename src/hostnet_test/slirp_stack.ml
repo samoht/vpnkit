@@ -79,11 +79,6 @@ module Make(Host: Sig.HOST) = struct
     include Tcpip_stack_direct.Make(Host.Time)
         (Stdlibrandom)(Netif)(Ethif1)(Arpv41)(Ipv41)(Icmpv41)(Udp1)(Tcp1)
 
-    let or_error name m =
-      m >>= function
-      | `Error _ -> Fmt.kstrf failwith "Failed to connect %s device" name
-      | `Ok x    -> Lwt.return x
-
     let connect (interface: VMNET.t) =
       Ethif1.connect interface >>= fun ethif ->
       Mclock.connect () >>= fun clock ->

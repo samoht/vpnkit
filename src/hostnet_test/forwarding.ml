@@ -64,10 +64,6 @@ module Make(Host: Sig.HOST) = struct
       Host.Sockets.Stream.Tcp.listen server accept;
       Lwt.return local_port
 
-    type t = {
-      local_port: int;
-      server: Host.Sockets.Stream.Tcp.server;
-    }
   end
 
   module Forward = Forward.Make(Mclock)(struct
