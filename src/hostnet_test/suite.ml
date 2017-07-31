@@ -225,7 +225,7 @@ module Make(Host: Sig.HOST) = struct
       Host.Sockets.Stream.Tcp.listen server accept;
       { local_port; server }
 
-    let to_string t = Printf.sprintf "tcp:127.0.0.1:%d" t.local_port
+    let pp ppf t = Fmt.pf ppf "tcp:127.0.0.1:%d" t.local_port
     let destroy t = Host.Sockets.Stream.Tcp.shutdown t.server
     let with_server f =
       create () >>= fun server ->

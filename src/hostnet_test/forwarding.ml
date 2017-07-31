@@ -157,7 +157,7 @@ module Make(Host: Sig.HOST) = struct
       Host.Sockets.Stream.Tcp.listen server accept;
       { local_port; server }
 
-    let to_string t = Printf.sprintf "tcp:127.0.0.1:%d" t.local_port
+    let pp ppf t = Fmt.pf ppf "tcp:127.0.0.1:%d" t.local_port
     let destroy t = Host.Sockets.Stream.Tcp.shutdown t.server
     let with_server f =
       create () >>= fun server ->
@@ -250,7 +250,9 @@ module Make(Host: Sig.HOST) = struct
     let t = LocalServer.with_server (fun server ->
         PortsServer.with_server (fun ports_port ->
             ForwardControl.with_connection ports_port (fun connection ->
-                let name = "tcp:127.0.0.1:0:" ^ LocalServer.to_string server in
+                let name =
+                  Fmt.strf "tcp:127.0.0.1:0:%a" LocalServer.pp server
+                in
                 ForwardControl.with_forward connection name (fun ip port ->
                     LocalClient.connect (ip, port)
                     >>= fun client ->
@@ -267,7 +269,9 @@ module Make(Host: Sig.HOST) = struct
     let t = LocalServer.with_server (fun server ->
         PortsServer.with_server (fun ports_port ->
             ForwardControl.with_connection ports_port (fun connection ->
-                let name = "tcp:127.0.0.1:0:" ^ LocalServer.to_string server in
+                let name =
+                  Fmt.strf "tcp:127.0.0.1:0:%a" LocalServer.pp server
+                in
                 ForwardControl.with_forward connection name (fun ip port ->
                     let rec loop = function
                     | 0 -> Lwt.return ()

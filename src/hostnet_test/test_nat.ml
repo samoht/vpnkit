@@ -55,9 +55,7 @@ module Make(Host: Sig.HOST) = struct
       Lwt.return t
 
     let get_seen_addresses t = t.seen_addresses
-
-    let to_string t =
-      Printf.sprintf "udp:127.0.0.1:%d" t.local_port
+    let pp ppf t = Fmt.pf ppf "udp:127.0.0.1:%d" t.local_port
     let destroy t = Host.Sockets.Datagram.Udp.shutdown t.server
     let with_server f =
       create () >>= fun server ->
