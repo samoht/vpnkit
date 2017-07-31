@@ -46,7 +46,7 @@ end
 module Init : sig
   type t
 
-  val to_string: t -> string
+  val pp: t Fmt.t
   val sizeof: int
   val default: t
 
@@ -60,7 +60,7 @@ module Command : sig
     | Ethernet of Uuidm.t (* 36 bytes *)
     | Bind_ipv4 of Ipaddr.V4.t * int * bool
 
-  val to_string: t -> string
+  val pp: t Fmt.t
   val sizeof: int
 
   val marshal: t -> Cstruct.t -> Cstruct.t

@@ -17,8 +17,8 @@ module Init = struct
     commit: string;
   }
 
-  let to_string t =
-    Fmt.strf "{ magic = %s; version = %ld; commit = %s }"
+  let pp ppf t =
+    Fmt.pf ppf "{ magic = %s; version = %ld; commit = %s }"
       t.magic t.version t.commit
 
   let sizeof = 5 + 4 + 40
@@ -49,10 +49,10 @@ module Command = struct
     | Ethernet of Uuidm.t (* 36 bytes *)
     | Bind_ipv4 of Ipaddr.V4.t * int * bool
 
-  let to_string = function
-  | Ethernet x -> Fmt.strf "Ethernet %a" Uuidm.pp x
+  let pp ppf = function
+  | Ethernet x -> Fmt.pf ppf "Ethernet %a" Uuidm.pp x
   | Bind_ipv4 (ip, port, tcp) ->
-    Fmt.strf "Bind_ipv4 %a %d %b" Ipaddr.V4.pp_hum ip port tcp
+    Fmt.pf ppf "Bind_ipv4 %a %d %b" Ipaddr.V4.pp_hum ip port tcp
 
   let sizeof = 1 + 36
 
@@ -106,8 +106,8 @@ module Vif = struct
     client_macaddr: Macaddr.t;
   }
 
-  let to_string t =
-    Fmt.strf "{ mtu = %d; max_packet_size = %d; client_macaddr = %s }"
+  let pp ppf t =
+    Fmt.pf ppf "{ mtu = %d; max_packet_size = %d; client_macaddr = %s }"
       t.mtu t.max_packet_size (Macaddr.to_string t.client_macaddr)
 
   let create client_macaddr mtu () =
@@ -209,15 +209,14 @@ module Make(C: Sig.CONN) = struct
     with_read (Channel.read_exactly ~len:Init.sizeof fd) @@ fun bufs ->
     let buf = Cstruct.concat bufs in
     let init, _ = Init.unmarshal buf in
-    Log.info (fun f -> f "PPP.negotiate: received %s" (Init.to_string init));
+    Log.info (fun f -> f "PPP.negotiate: received %a" Init.pp init);
     let (_: Cstruct.t) = Init.marshal Init.default buf in
     Channel.write_buffer fd buf;
     with_flush (Channel.flush fd) @@ fun () ->
     with_read (Channel.read_exactly ~len:Command.sizeof fd) @@ fun bufs ->
     let buf = Cstruct.concat bufs in
     with_msg (Command.unmarshal buf) @@ fun (command, _) ->
-    Log.info (fun f ->
-        f "PPP.negotiate: received %s" (Command.to_string command));
+    Log.info (fun f -> f "PPP.negotiate: received %a" Command.pp command);
     match command with
     | Command.Bind_ipv4 _ -> failf "PPP.negotiate: unsupported command Bind_ipv4"
     | Command.Ethernet uuid ->
@@ -225,7 +224,7 @@ module Make(C: Sig.CONN) = struct
       let vif = Vif.create client_macaddr mtu () in
       let buf = Cstruct.create Vif.sizeof in
       let (_: Cstruct.t) = Vif.marshal vif buf in
-      Log.info (fun f -> f "PPP.negotiate: sending %s" (Vif.to_string vif));
+      Log.info (fun f -> f "PPP.negotiate: sending %a" Vif.pp vif);
       Channel.write_buffer fd buf;
       with_flush (Channel.flush fd) @@ fun () ->
       Lwt_result.return (uuid, client_macaddr)
@@ -238,7 +237,7 @@ module Make(C: Sig.CONN) = struct
     with_read (Channel.read_exactly ~len:Init.sizeof fd) @@ fun bufs ->
     let buf = Cstruct.concat bufs in
     let init, _ = Init.unmarshal buf in
-    Log.info (fun f -> f "Client.negotiate: received %s" (Init.to_string init));
+    Log.info (fun f -> f "Client.negotiate: received %a" Init.pp init);
     let buf = Cstruct.create Command.sizeof in
     let (_: Cstruct.t) = Command.marshal (Command.Ethernet uuid) buf in
     Channel.write_buffer fd buf;
@@ -247,7 +246,7 @@ module Make(C: Sig.CONN) = struct
     let buf = Cstruct.concat bufs in
     let open Lwt_result.Infix in
     Lwt.return (Vif.unmarshal buf) >>= fun (vif, _) ->
-    Log.debug (fun f -> f "Client.negotiate: vif %s" (Vif.to_string vif));
+    Log.debug (fun f -> f "Client.negotiate: vif %a" Vif.pp vif);
     Lwt_result.return (vif)
 
   (* Use blocking I/O here so we can avoid Using Lwt_unix or Uwt. Ideally we

@@ -52,8 +52,7 @@ module Make(Socket: Sig.SOCKETS) = struct
     with_read (Channel.read_exactly ~len:Init.sizeof c) @@ fun bufs ->
     let buf = Cstruct.concat bufs in
     let init, _ = Init.unmarshal buf in
-    Log.info (fun f ->
-        f "Client.negotiate: received %s" (Init.to_string init));
+    Log.info (fun f -> f "Client.negotiate: received %a" Init.pp init);
     Lwt_result.return { fd; c }
 
   let bind_ipv4 t (ipv4, port, stream) =
